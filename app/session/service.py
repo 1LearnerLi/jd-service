@@ -1,13 +1,11 @@
 """会话层 CRUD 服务"""
 import uuid
-from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from loguru import logger
 
 from app.session.models import Session, Message
-from app.core.exceptions import NotFoundException
 
 
 class SessionService:
