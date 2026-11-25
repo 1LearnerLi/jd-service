@@ -8,6 +8,6 @@ PLATFORM_INTENTS: list[IntentDefinition] = [
     ),
     IntentDefinition(
         name="transfer_human",
-        description="用户明确要求转接人工客服、投诉、或者表达对AI回复的不满",
+        description="用户明确要求转接人工客服、投诉、索要人工联系方式（电话/邮箱）、或者表达对AI回复的不满",
     ),
 ]

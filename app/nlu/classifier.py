@@ -126,9 +126,8 @@ class IntentClassifier:
 
         try:
             structured_llm = self.llm.with_structured_output(
-                output_schema=NLUResult,
-                # 不使用严格模式，避免 LLM 输出不符合 JSON 格式时抛出异常
-                strict=False,
+                schema=NLUResult,
+                method="json_mode",
             )
             result = await structured_llm.ainvoke(messages)
             logger.info(
