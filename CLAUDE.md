@@ -61,7 +61,7 @@ uv run uvicorn app.main:app --reload       # 开发服务器
 1. 开始任务前确认目标分支，默认从 `dev` 创建任务分支。
 2. 每个任务使用独立分支，例如 `feature/order-refund-flow` 或 `fix/login-timeout`。
 3. 需要隔离工作区时，使用 `superpowers:using-git-worktrees` 创建或检测 worktree；所有代码修改都在任务 worktree 中完成。
-4. 完成修改后运行相关测试和检查；涉及 Python、Vue、通用审查或安全审查时，按需使用 `ccpv` 的 review/scan 命令。
+4. 完成修改后运行相关测试和检查；涉及 Python、Vue、通用审查或安全审查时，按需使用 `ccpv` 的 review 命令。
 5. 提交清晰、范围集中的 commit，参考 `ccpv:git-workflow` 编写 commit message 和 PR/MR 描述。
 6. 推送任务分支并创建 PR/MR 到 `dev` 或约定目标分支。
 7. 不自动 merge；只有用户明确授权或 PR/MR 评审、CI 通过后才能合并。
