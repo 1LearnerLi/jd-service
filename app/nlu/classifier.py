@@ -125,22 +125,12 @@ class IntentClassifier:
         ]
 
         try:
-            response = await self.llm.ainvoke(messages)
-            content = response.content.strip()
-
-            # 去掉可能的 markdown code block 包裹
-            if content.startswith("```"):
-                # 去掉首行 ```json 或 ```
-                lines = content.split("\n", 1)
-                if len(lines) > 1:
-                    content = lines[1]
-                else:
-                    content = lines[0][3:]
-            if content.endswith("```"):
-                content = content[:-3].strip()
-
-            data = json.loads(content)
-            result = NLUResult(**data)
+            structured_llm = self.llm.with_structured_output(
+                output_schema=NLUResult,
+                # 不使用严格模式，避免 LLM 输出不符合 JSON 格式时抛出异常
+                strict=False,
+            )
+            result = await structured_llm.ainvoke(messages)
             logger.info(
                 f"意图分类: intent={result.intent}, confidence={result.confidence}, "
                 f"slots={result.slots}, missing={result.missing_slots}"

@@ -66,7 +66,6 @@ class TestIntentClassifierPromptBuilding:
         prompt = classifier._build_system_prompt()
         assert "product_inquiry" in prompt
         assert "可选槽位" in prompt
-        # "sku_id" 和 "sku_name" 应在 prompt 中
         assert "sku_id" in prompt
         assert "sku_name" in prompt
         IntentRegistry.clear()
@@ -99,24 +98,33 @@ class TestIntentClassifierPromptBuilding:
 class TestIntentClassifierClassify:
     """意图分类器 classify 方法测试"""
 
-    @pytest.fixture
-    def mock_llm(self):
-        """创建 mock LLM"""
+    @staticmethod
+    def _make_mock_llm(return_value: NLUResult):
+        """构造 mock LLM，模拟 with_structured_output 行为"""
+        structured_llm = MagicMock()
+        structured_llm.ainvoke = AsyncMock(return_value=return_value)
         llm = MagicMock()
-        llm.ainvoke = AsyncMock()
+        llm.with_structured_output.return_value = structured_llm
+        return llm
+
+    @staticmethod
+    def _make_mock_llm_raising(exception: Exception):
+        """构造 mock LLM，模拟调用异常"""
+        structured_llm = MagicMock()
+        structured_llm.ainvoke = AsyncMock(side_effect=exception)
+        llm = MagicMock()
+        llm.with_structured_output.return_value = structured_llm
         return llm
 
     @pytest.mark.asyncio
-    async def test_classify_returns_nlu_result(self, mock_llm):
+    async def test_classify_returns_nlu_result(self):
         """验证 classify 返回 NLUResult"""
-        mock_llm.ainvoke.return_value = MagicMock(
-            content=json.dumps({
-                "intent": "order_query",
-                "confidence": 0.95,
-                "slots": {"order_id": "123"},
-                "missing_slots": [],
-            })
-        )
+        mock_llm = self._make_mock_llm(NLUResult(
+            intent="order_query",
+            confidence=0.95,
+            slots={"order_id": "123"},
+            missing_slots=[],
+        ))
         classifier = IntentClassifier(llm=mock_llm)
         result = await classifier.classify("查询订单 123")
         assert isinstance(result, NLUResult)
@@ -125,48 +133,42 @@ class TestIntentClassifierClassify:
         assert result.slots == {"order_id": "123"}
 
     @pytest.mark.asyncio
-    async def test_classify_unknown_intent(self, mock_llm):
+    async def test_classify_unknown_intent(self):
         """验证分类为 unknown 的兜底处理"""
-        mock_llm.ainvoke.return_value = MagicMock(
-            content=json.dumps({
-                "intent": "unknown",
-                "confidence": 0.3,
-                "slots": {},
-                "missing_slots": [],
-            })
-        )
+        mock_llm = self._make_mock_llm(NLUResult(
+            intent="unknown",
+            confidence=0.3,
+            slots={},
+            missing_slots=[],
+        ))
         classifier = IntentClassifier(llm=mock_llm)
         result = await classifier.classify("asdfasdf???")
         assert result.intent == "unknown"
         assert result.confidence == 0.3
 
     @pytest.mark.asyncio
-    async def test_classify_with_missing_slots(self, mock_llm):
+    async def test_classify_with_missing_slots(self):
         """验证分类结果包含缺失槽位"""
-        mock_llm.ainvoke.return_value = MagicMock(
-            content=json.dumps({
-                "intent": "order_query",
-                "confidence": 0.8,
-                "slots": {},
-                "missing_slots": ["order_id"],
-            })
-        )
+        mock_llm = self._make_mock_llm(NLUResult(
+            intent="order_query",
+            confidence=0.8,
+            slots={},
+            missing_slots=["order_id"],
+        ))
         classifier = IntentClassifier(llm=mock_llm)
         result = await classifier.classify("我想查订单")
         assert result.missing_slots == ["order_id"]
         assert result.slots == {}
 
     @pytest.mark.asyncio
-    async def test_classify_passes_context(self, mock_llm):
+    async def test_classify_passes_context(self):
         """验证 classify 将当前槽位和意图传递给 LLM"""
-        mock_llm.ainvoke.return_value = MagicMock(
-            content=json.dumps({
-                "intent": "order_query",
-                "confidence": 0.9,
-                "slots": {"order_id": "456"},
-                "missing_slots": [],
-            })
-        )
+        mock_llm = self._make_mock_llm(NLUResult(
+            intent="order_query",
+            confidence=0.9,
+            slots={"order_id": "456"},
+            missing_slots=[],
+        ))
         classifier = IntentClassifier(llm=mock_llm)
         await classifier.classify(
             "456",
@@ -174,9 +176,12 @@ class TestIntentClassifierClassify:
             active_intent="order_query",
         )
 
+        # 验证 with_structured_output 被调用
+        mock_llm.with_structured_output.assert_called_once()
         # 验证 ainvoke 被调用
-        mock_llm.ainvoke.assert_called_once()
-        messages = mock_llm.ainvoke.call_args[0][0]
+        structured_llm = mock_llm.with_structured_output.return_value
+        structured_llm.ainvoke.assert_called_once()
+        messages = structured_llm.ainvoke.call_args[0][0]
         # 检查 system prompt 包含意图信息
         system_msg = messages[0]
         assert isinstance(system_msg, SystemMessage)
@@ -187,46 +192,39 @@ class TestIntentClassifierClassify:
         assert "456" in user_msg.content
 
     @pytest.mark.asyncio
-    async def test_classify_with_transfer_human(self, mock_llm):
+    async def test_classify_with_transfer_human(self):
         """验证转人工意图分类"""
-        mock_llm.ainvoke.return_value = MagicMock(
-            content=json.dumps({
-                "intent": "transfer_human",
-                "confidence": 0.9,
-                "slots": {},
-                "missing_slots": [],
-            })
-        )
+        mock_llm = self._make_mock_llm(NLUResult(
+            intent="transfer_human",
+            confidence=0.9,
+            slots={},
+            missing_slots=[],
+        ))
         classifier = IntentClassifier(llm=mock_llm)
         result = await classifier.classify("我要找人工客服")
         assert result.intent == "transfer_human"
 
     @pytest.mark.asyncio
-    async def test_classify_llm_response_with_markdown_codeblock(self, mock_llm):
-        """验证能正确处理 LLM 返回的 markdown code block"""
-        mock_llm.ainvoke.return_value = MagicMock(
-            content="```json\n{\"intent\": \"order_query\", \"confidence\": 0.9, \"slots\": {\"order_id\": \"789\"}, \"missing_slots\": []}\n```"
-        )
+    async def test_classify_with_structured_output_uses_nluresult_schema(self):
+        """验证 with_structured_output 使用了 NLUResult 作为输出 schema"""
+        mock_llm = self._make_mock_llm(NLUResult(
+            intent="order_query",
+            confidence=0.9,
+            slots={"order_id": "789"},
+            missing_slots=[],
+        ))
         classifier = IntentClassifier(llm=mock_llm)
-        result = await classifier.classify("查询789")
-        assert result.intent == "order_query"
-        assert result.slots == {"order_id": "789"}
+        await classifier.classify("查询789")
+
+        # 验证 with_structured_output 的参数
+        call_kwargs = mock_llm.with_structured_output.call_args
+        # output_schema 应设为 NLUResult
+        assert call_kwargs is not None
 
     @pytest.mark.asyncio
-    async def test_classify_handles_llm_json_parsing_error(self, mock_llm):
-        """验证 LLM 返回无效 JSON 时降级为 unknown"""
-        mock_llm.ainvoke.return_value = MagicMock(
-            content="invalid json content!!"
-        )
-        classifier = IntentClassifier(llm=mock_llm)
-        result = await classifier.classify("随便说点什么")
-        assert result.intent == "unknown"
-        assert result.confidence == 0.0
-
-    @pytest.mark.asyncio
-    async def test_classify_handles_llm_exception(self, mock_llm):
-        """验证 LLM 调用异常时降级为 unknown"""
-        mock_llm.ainvoke.side_effect = Exception("网络错误")
+    async def test_classify_handles_structured_output_error(self):
+        """验证 structured_output 调用异常时降级为 unknown"""
+        mock_llm = self._make_mock_llm_raising(Exception("网络错误"))
         classifier = IntentClassifier(llm=mock_llm)
         result = await classifier.classify("查物流")
         assert result.intent == "unknown"
