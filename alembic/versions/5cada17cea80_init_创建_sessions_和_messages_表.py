@@ -20,7 +20,6 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """创建 sessions 和 messages 表"""
-    # 创建 sessions 表
     op.create_table(
         "sessions",
         sa.Column("id", sa.String(50), primary_key=True),
@@ -36,7 +35,6 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now()),
     )
 
-    # 创建 messages 表
     op.create_table(
         "messages",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
