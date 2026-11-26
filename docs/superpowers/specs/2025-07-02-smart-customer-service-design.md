@@ -109,8 +109,7 @@ class DialogState(TypedDict):
     active_intent: str                 # 当前活跃意图名
     slots: dict[str, Any]              # 已填充槽位
     missing_slots: list[str]           # 缺失必填槽位
-    pending_ask: str                   # 追问内容
-    business_result: Any               # 业务执行结果
+    business_result: BusinessResult | None  # 业务执行结果
     final_response: str                # 最终回复
     should_fallback: bool              # 是否兜底
 ```
@@ -120,10 +119,13 @@ class DialogState(TypedDict):
 ```
 entry → nlu → [条件路由]
   ├─ 平台意图 (unknown/transfer_human) → fallback → response
-  └─ 业务意图 → slot_filling → [条件路由]
-       ├─ 槽位齐全 → business → response
-       └─ 槽位缺失 → response（返回追问）
+  └─ 业务意图 → business → response
 ```
+
+槽位填充由业务 Handler 通过 `BusinessResult.ask_slot()` 处理，DM 图无需独立 `slot_filling` 节点。Handler 内部按 required_slots 顺序逐槽位检查：
+- 槽位缺失 → 返回 `BusinessResult.ask_slot()`，NLGEngine 直接透传 `message` + `data`
+- 槽位齐全 → 执行并返回 `BusinessResult.completed()`
+- 执行失败 → 返回 `BusinessResult.error()`
 
 ### 意图管理
 
@@ -172,12 +174,14 @@ business/ecommerce/
 
 ## NLG 层
 
-| 场景 | 策略 | 模板 |
+| 场景 | 策略 | 说明 |
 |------|------|------|
-| 业务操作结果（订单详情等） | `TemplateEngine` (Jinja2) | `templates/{intent}.j2` |
-| 槽位追问 | `TemplateEngine` | `templates/slot_filling.j2` |
+| 业务操作结果（订单详情等） | `TemplateEngine` (Jinja2) | 模板位于业务线目录 `business/ecommerce/templates/{intent}.j2`，由 Handler 调用并填入 `BusinessResult.message` |
+| 槽位追问 | `BusinessResult.ask_slot()` | 固定数据结构 `{ action, message, slot_to_fill, options }`，前端据此渲染选项按钮，无需模板 |
 | 闲聊/兜底/unknown | `LLMGenerator` | 自由生成 |
-| 转人工 | `TemplateEngine` | `templates/transfer_human.j2` |
+| 转人工 | 硬编码 | 消息简短，直接返回固定文案 |
+
+> **设计原则**：模板归属业务线，模板渲染输出只能作为 `BusinessResult.message` 内容。NLGEngine 不直接调用 TemplateEngine。
 
 ## 前端设计
 

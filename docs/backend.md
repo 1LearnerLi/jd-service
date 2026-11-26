@@ -1562,21 +1562,24 @@ git commit -m "feat: 添加电商业务线意图注册和槽位驱动处理器"
 - Create: `app/nlg/template_engine.py`
 - Create: `app/nlg/llm_generator.py`
 - Create: `app/nlg/engine.py`
-- Create: `app/nlg/templates/order_query.j2`
-- Create: `app/nlg/templates/postsale_return.j2`
-- Create: `app/nlg/templates/slot_filling.j2`
-- Create: `app/nlg/templates/transfer_human.j2`
+- Create: `app/business/ecommerce/templates/order_query.j2`
+- Create: `app/business/ecommerce/templates/postsale_return.j2`
+
+**设计原则：**
+- **槽位追问不使用模板**：`BusinessResult.ask_slot()` 已定义固定数据结构（`action`、`message`、`slot_to_fill`、`options`），前端据此渲染选项按钮，无需 Jinja2 模板。
+- **模板归属业务线**：业务相关的模板（如 `order_query.j2`）放在 `business/ecommerce/templates/` 下，不放在平台级 `app/nlg/templates/`。
+- **模板引擎输出只作为 message**：所有模板渲染出的文本只能作为 `BusinessResult` 中的 `message` 字段内容，由业务 Handler 负责调用模板引擎渲染；NLGEngine 不直接渲染模板并返回给前端。
 
 **Interfaces:**
 - Consumes: `BusinessResult`, `ChatOpenAI`
 - Produces:
-  - `TemplateEngine.render(template_name, context) → str`
-  - `LLMGenerator.generate(intent, prompt_context) → str`
-  - `NLGEngine.generate(intent, business_result, context) → str`
+  - `TemplateEngine(template_dir).render(template_name, context) → str` — 供业务 Handler 调用，渲染 message
+  - `LLMGenerator.generate(user_input) → str` — 闲聊/兜底场景
+  - `NLGEngine.generate(intent, business_result, context) → str` — 统一入口
 
-- [ ] **Step 1: 创建 Jinja2 模板**
+- [ ] **Step 1: 创建业务线模板文件**
 
-`app/nlg/templates/order_query.j2`:
+`app/business/ecommerce/templates/order_query.j2`:
 ```jinja2
 📋 **订单详情**
 
@@ -1595,7 +1598,7 @@ git commit -m "feat: 添加电商业务线意图注册和槽位驱动处理器"
 {% endif %}
 ```
 
-`app/nlg/templates/postsale_return.j2`:
+`app/business/ecommerce/templates/postsale_return.j2`:
 ```jinja2
 📦 **售后申请 — {{ data.order_id }}**
 
@@ -1610,41 +1613,33 @@ git commit -m "feat: 添加电商业务线意图注册和槽位驱动处理器"
 请问您想对哪个商品申请售后？请告诉我商品编号。
 ```
 
-`app/nlg/templates/slot_filling.j2`:
-```jinja2
-{{ ask_prompt }}
-```
-
-`app/nlg/templates/transfer_human.j2`:
-```jinja2
-正在为您转接人工客服，请稍候...
-
-{{ message }}
-```
+> **注意**：不再需要 `app/nlg/templates/slot_filling.j2`（槽位追问使用 `BusinessResult.ask_slot()` 固定结构）和 `app/nlg/templates/transfer_human.j2`（消息简短，直接硬编码）。
 
 - [ ] **Step 2: 创建 app/nlg/template_engine.py**
 
 ```python
-"""Jinja2 模板引擎"""
+"""Jinja2 模板引擎 — 供业务 Handler 渲染 message 使用"""
 from jinja2 import Environment, FileSystemLoader, TemplateNotFound
 from loguru import logger
 
-from pathlib import Path
-
 
 class TemplateEngine:
-    """模板引擎 — 用于需要精确数据的场景"""
+    """模板引擎 — 用于需要精确数据的场景（由业务 Handler 调用）"""
 
-    def __init__(self, template_dir: str | None = None):
-        if template_dir is None:
-            template_dir = str(Path(__file__).parent / "templates")
+    def __init__(self, template_dir: str):
+        """初始化模板引擎
+
+        Args:
+            template_dir: 模板目录的绝对路径，由调用方（业务 Handler）指定。
+                          例如：Path(__file__).parent.parent / "templates"
+        """
         self._env = Environment(
             loader=FileSystemLoader(template_dir),
             autoescape=False,
         )
 
     async def render(self, template_name: str, context: dict) -> str:
-        """渲染模板"""
+        """渲染模板，返回字符串供业务 Handler 填入 BusinessResult.message"""
         try:
             template = self._env.get_template(template_name)
             result = template.render(**context)
@@ -1707,17 +1702,23 @@ class LLMGenerator:
 - [ ] **Step 4: 创建 app/nlg/engine.py**
 
 ```python
-"""NLG 引擎 — 根据意图路由到合适的生成策略"""
-from app.nlg.template_engine import TemplateEngine
+"""NLG 引擎 — 根据意图和业务结果路由到合适的生成策略"""
 from app.nlg.llm_generator import LLMGenerator
 from app.business.base import BusinessResult
 
 
 class NLGEngine:
-    """NLG 生成引擎"""
+    """NLG 生成引擎
+
+    职责：根据 intent 和 business_result 决定回复内容。
+    - 有 BusinessResult 时直接使用其 message（由业务 Handler 已渲染好）
+    - 兜底/unknown 时使用 LLM 生成
+    - 转人工时返回固定文案
+
+    注意：模板渲染由业务 Handler 负责，NLGEngine 不直接调用 TemplateEngine。
+    """
 
     def __init__(self):
-        self._template = TemplateEngine()
         self._llm = LLMGenerator()
 
     async def generate(
@@ -1729,40 +1730,22 @@ class NLGEngine:
         """根据意图和业务结果生成回复"""
         context = context or {}
 
-        # 业务意图（有结果）→ 模板渲染
-        if intent in ("order_query", "postsale_return"):
-            if business_result and business_result.success:
-                return await self._template.render(
-                    f"{intent}.j2",
-                    {"data": business_result.data},
-                )
-            else:
-                error_msg = (
-                    business_result.error_message
-                    if business_result
-                    else "业务处理失败"
-                )
-                return error_msg
+        # 有业务结果 → 直接使用已渲染好的 message（含 ask_slot / completed / error）
+        if business_result is not None:
+            return business_result.message
 
-        # 槽位追问 → 模板渲染
-        if intent == "slot_filling":
-            return await self._template.render("slot_filling.j2", context)
-
-        # 转人工 → 模板渲染
+        # 转人工 → 固定文案
         if intent == "transfer_human":
-            return await self._template.render(
-                "transfer_human.j2",
-                {"message": context.get("message", "正在转接...")},
-            )
+            return "正在为您转接人工客服，请稍候..."
 
-        # 兜底 → LLM 生成
+        # 兜底 / unknown → LLM 自由生成
         return await self._llm.generate(context.get("user_input", ""))
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/nlg/
+git add app/nlg/ app/business/ecommerce/templates/
 git commit -m "feat: 添加 NLG 层模板引擎和 LLM 生成器"
 ```
 
@@ -1770,13 +1753,20 @@ git commit -m "feat: 添加 NLG 层模板引擎和 LLM 生成器"
 
 ### Task 13: DM 层 — 状态定义与图构建
 
+**设计说明：** 槽位填充由业务 Handler 通过 `BusinessResult.ask_slot()` 处理（Handler 内部检查槽位，缺失时返回选项列表），DM 图无需独立的 `slot_filling` 节点。简化后的节点流程：
+
+```
+entry → nlu → [条件路由]
+  ├─ 平台意图 (unknown/transfer_human) → fallback → response
+  └─ 业务意图 → business → response
+```
+
 **Files:**
 - Create: `app/dm/__init__.py`
 - Create: `app/dm/state.py`
 - Create: `app/dm/router.py`
 - Create: `app/dm/nodes/__init__.py`
 - Create: `app/dm/nodes/nlu_node.py`
-- Create: `app/dm/nodes/slot_filling_node.py`
 - Create: `app/dm/nodes/business_node.py`
 - Create: `app/dm/nodes/response_node.py`
 - Create: `app/dm/nodes/fallback_node.py`
@@ -1790,8 +1780,7 @@ git commit -m "feat: 添加 NLG 层模板引擎和 LLM 生成器"
 
 ```python
 """DM 层 DialogState 定义"""
-from typing import Annotated, Any, TypedDict
-from langgraph.graph.message import add_messages
+from typing import Any, TypedDict
 
 
 class IntentContext(TypedDict):
@@ -1811,11 +1800,12 @@ class DialogState(TypedDict):
     active_intent: str
     slots: dict[str, object]
     missing_slots: list[str]
-    pending_ask: str
-    business_result: object
+    business_result: object      # BusinessResult | None，由业务节点产出
     final_response: str
     should_fallback: bool
 ```
+
+> **注意**：`missing_slots` 仍由 NLU 节点产出，供业务 Handler 的 `BusinessContext` 使用；回复统一通过 `business_result.message` 返回，不需要单独的 `pending_ask` 字段。
 
 - [ ] **Step 2: 创建 app/dm/router.py**
 
@@ -1827,13 +1817,9 @@ def is_platform_intent(state: dict) -> bool:
     """判断当前活跃意图是否为平台意图"""
     active = state.get("active_intent", "")
     return active in ("unknown", "transfer_human")
-
-
-def are_slots_filled(state: dict) -> bool:
-    """判断槽位是否全部填充"""
-    missing = state.get("missing_slots", [])
-    return len(missing) == 0
 ```
+
+> **注意**：`are_slots_filled` 不再需要——槽位检查由业务 Handler 内部完成，DM 图只做平台/业务意图的二选一路由。
 
 - [ ] **Step 3: 创建 DM 各节点**
 
@@ -1877,35 +1863,6 @@ async def nlu_node(state: dict) -> dict:
     }
 ```
 
-`app/dm/nodes/slot_filling_node.py`:
-```python
-"""槽位填充节点 — 生成追问"""
-from app.nlu.registry import IntentRegistry
-
-
-async def slot_filling_node(state: dict) -> dict:
-    """检查缺失槽位，生成追问提示"""
-    active_intent = state.get("active_intent", "")
-    missing_slots = state.get("missing_slots", [])
-
-    registry = IntentRegistry()
-    intent_def = registry.get_intent_by_name(active_intent)
-
-    if not missing_slots or intent_def is None:
-        return {"pending_ask": ""}
-
-    # 找到第一个缺失槽位的追问提示
-    missing_name = missing_slots[0]
-    slot_def = next(
-        (s for s in intent_def.required_slots if s.name == missing_name),
-        None,
-    )
-
-    ask_prompt = slot_def.ask_prompt if slot_def else f"请提供 {missing_name}"
-
-    return {"pending_ask": ask_prompt}
-```
-
 `app/dm/nodes/business_node.py`:
 ```python
 """业务节点 — 调用业务线的意图处理器"""
@@ -1923,17 +1880,20 @@ _handler_map = {
 
 
 async def business_node(state: dict) -> dict:
-    """执行业务意图"""
+    """执行业务意图
+
+    Handler 内部按 required_slots 顺序逐槽位检查：
+    - 缺失 → 返回 BusinessResult.ask_slot()（含 options 列表供前端渲染）
+    - 齐全 → 执行并返回 BusinessResult.completed()
+    - 失败 → 返回 BusinessResult.error()
+    """
     active_intent = state.get("active_intent", "")
 
     handler_cls = _handler_map.get(active_intent)
     if handler_cls is None:
         logger.warning(f"未找到意图处理器: {active_intent}")
         return {
-            "business_result": BusinessResult(
-                success=False,
-                error_message="该功能暂未开放",
-            )
+            "business_result": BusinessResult.error("该功能暂未开放"),
         }
 
     ctx = BusinessContext(
@@ -1946,7 +1906,7 @@ async def business_node(state: dict) -> dict:
     handler = handler_cls()
     result = await handler.handle(ctx)
 
-    logger.info(f"业务节点执行: intent={active_intent}, success={result.success}")
+    logger.info(f"业务节点执行: intent={active_intent}, action={result.action}")
     return {"business_result": result}
 ```
 
@@ -1962,23 +1922,16 @@ async def fallback_node(state: dict) -> dict:
 
     if active_intent == "transfer_human":
         logger.info("触发转人工")
-        return {
-            "final_response": "",
-            "should_fallback": True,
-        }
     else:
         logger.info("触发 unknown 兜底")
-        return {
-            "final_response": "",
-            "should_fallback": True,
-        }
+
+    return {"should_fallback": True}
 ```
 
 `app/dm/nodes/response_node.py`:
 ```python
 """回复生成节点 — 调用 NLG 引擎"""
 from app.nlg.engine import NLGEngine
-from app.business.base import BusinessResult
 
 _engine: NLGEngine | None = None
 
@@ -1991,41 +1944,23 @@ def get_engine() -> NLGEngine:
 
 
 async def response_node(state: dict) -> dict:
-    """生成最终回复"""
+    """生成最终回复
+
+    NLGEngine.generate() 逻辑：
+    - 有 business_result → 直接使用 business_result.message
+    - should_fallback + transfer_human → 硬编码文案
+    - 其他兜底 → LLM 自由生成
+    """
     intent = state.get("active_intent", "unknown")
     business_result = state.get("business_result")
     should_fallback = state.get("should_fallback", False)
-    pending_ask = state.get("pending_ask", "")
     user_input = state.get("user_input", "")
 
     engine = get_engine()
-
-    # 槽位缺失 → 返回追问
-    if pending_ask:
-        response_text = await engine.generate(
-            intent="slot_filling",
-            context={"ask_prompt": pending_ask},
-        )
-        return {"final_response": response_text}
-
-    # 兜底
-    if should_fallback:
-        if intent == "transfer_human":
-            response_text = await engine.generate(
-                intent="transfer_human",
-                context={"message": "正在为您转接人工客服..."},
-            )
-        else:
-            response_text = await engine.generate(
-                intent="unknown",
-                context={"user_input": user_input},
-            )
-        return {"final_response": response_text}
-
-    # 业务结果
     response_text = await engine.generate(
         intent=intent,
         business_result=business_result,
+        context={"user_input": user_input} if should_fallback else None,
     )
     return {"final_response": response_text}
 ```
@@ -2037,21 +1972,23 @@ async def response_node(state: dict) -> dict:
 from langgraph.graph import StateGraph, END
 
 from app.dm.state import DialogState
-from app.dm.router import is_platform_intent, are_slots_filled
+from app.dm.router import is_platform_intent
 from app.dm.nodes.nlu_node import nlu_node
-from app.dm.nodes.slot_filling_node import slot_filling_node
 from app.dm.nodes.business_node import business_node
 from app.dm.nodes.response_node import response_node
 from app.dm.nodes.fallback_node import fallback_node
 
 
 def build_dialog_graph() -> StateGraph:
-    """构建对话状态图"""
+    """构建对话状态图
+
+    节点流程：
+    entry → nlu → [平台意图 → fallback | 业务意图 → business] → response → END
+    """
     workflow = StateGraph(DialogState)
 
     # 添加节点
     workflow.add_node("nlu", nlu_node)
-    workflow.add_node("slot_filling", slot_filling_node)
     workflow.add_node("business", business_node)
     workflow.add_node("response", response_node)
     workflow.add_node("fallback", fallback_node)
@@ -2059,27 +1996,17 @@ def build_dialog_graph() -> StateGraph:
     # 设置入口
     workflow.set_entry_point("nlu")
 
-    # NLU 后的条件路由
+    # NLU 后的条件路由：平台意图走 fallback，业务意图走 business
     workflow.add_conditional_edges(
         "nlu",
-        lambda state: "fallback" if is_platform_intent(state) else "slot_filling",
+        lambda state: "fallback" if is_platform_intent(state) else "business",
         {
             "fallback": "fallback",
-            "slot_filling": "slot_filling",
-        },
-    )
-
-    # 槽位填充后的条件路由
-    workflow.add_conditional_edges(
-        "slot_filling",
-        lambda state: "business" if are_slots_filled(state) else "response",
-        {
             "business": "business",
-            "response": "response",
         },
     )
 
-    # 其他节点 → response 或 END
+    # business / fallback 都走向 response
     workflow.add_edge("business", "response")
     workflow.add_edge("fallback", "response")
     workflow.add_edge("response", END)
@@ -2238,7 +2165,6 @@ async def send_message(
         "active_intent": "",
         "slots": {},
         "missing_slots": [],
-        "pending_ask": "",
         "business_result": None,
         "final_response": "",
         "should_fallback": False,

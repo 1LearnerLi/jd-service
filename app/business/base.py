@@ -38,6 +38,17 @@ class BusinessResult(BaseModel):
         description="错误描述",
     )
 
+    @property
+    def message(self) -> str:
+        """获取面向用户的消息文本
+
+        优先从 data["message"] 取（ask_slot / completed 情况），
+        否则回退到 error_message（error 情况）。
+        """
+        if isinstance(self.data, dict) and "message" in self.data:
+            return str(self.data["message"])
+        return self.error_message or ""
+
     # ── 统一工厂方法 ──────────────────────────────────
 
     @classmethod
