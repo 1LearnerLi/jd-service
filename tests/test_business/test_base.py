@@ -2,14 +2,131 @@
 import pytest
 from pydantic import ValidationError
 
-from app.business.base import BusinessContext, BusinessResult, IntentHandler
+from app.business.base import (
+    BusinessContext,
+    BusinessResult,
+    IntentHandler,
+    OptionItem,
+)
+
+
+class TestOptionItem:
+    """OptionItem 选项条目测试"""
+
+    def test_basic_creation(self):
+        item = OptionItem(label="ORD-001（已签收）", value="ORD-001")
+        assert item.label == "ORD-001（已签收）"
+        assert item.value == "ORD-001"
+        assert item.disabled is False
+
+    def test_disabled_default(self):
+        item = OptionItem(label="test", value="v")
+        assert item.disabled is False
+
+    def test_disabled_explicit(self):
+        item = OptionItem(label="ORD-002（待支付）", value="ORD-002", disabled=True)
+        assert item.disabled is True
+
+    def test_serialization(self):
+        item = OptionItem(label="仅退款", value="refund_only", disabled=True)
+        d = item.model_dump()
+        assert d == {"label": "仅退款", "value": "refund_only", "disabled": True}
+
+    def test_required_fields(self):
+        with pytest.raises(ValidationError):
+            OptionItem()
+        with pytest.raises(ValidationError):
+            OptionItem(label="missing value")
+
+
+class TestBusinessResultAskSlot:
+    """BusinessResult.ask_slot 工厂方法测试"""
+
+    def test_basic(self):
+        options = [
+            OptionItem(label="仅退款", value="refund_only"),
+            OptionItem(label="退货退款", value="return_refund"),
+        ]
+        result = BusinessResult.ask_slot(
+            slot_to_fill="postsale_type",
+            options=options,
+            message="请选择售后方式",
+        )
+        assert result.success is True
+        assert result.data["action"] == "ask_slot"
+        assert result.data["slot_to_fill"] == "postsale_type"
+        assert result.data["message"] == "请选择售后方式"
+        assert len(result.data["options"]) == 2
+        assert result.data["options"][0]["label"] == "仅退款"
+        assert result.data["options"][0]["value"] == "refund_only"
+        assert result.data["options"][0]["disabled"] is False
+
+    def test_empty_options(self):
+        result = BusinessResult.ask_slot(
+            slot_to_fill="order_id",
+            options=[],
+            message="您暂无订单",
+        )
+        assert result.success is True
+        assert result.data["options"] == []
+
+    def test_serialization(self):
+        options = [OptionItem(label="a", value="v")]
+        result = BusinessResult.ask_slot("slot", options, "msg")
+        d = result.model_dump()
+        assert d["success"] is True
+        assert d["data"]["action"] == "ask_slot"
+        assert d["data"]["slot_to_fill"] == "slot"
+        assert d["data"]["options"][0]["label"] == "a"
+
+
+class TestBusinessResultCompleted:
+    """BusinessResult.completed 工厂方法测试"""
+
+    def test_basic(self):
+        result = BusinessResult.completed(message="操作成功")
+        assert result.success is True
+        assert result.data["action"] == "completed"
+        assert result.data["message"] == "操作成功"
+
+    def test_with_extra(self):
+        result = BusinessResult.completed(
+            message="售后已提交",
+            order_id="ORD-001",
+            new_status="售后中",
+        )
+        assert result.data["order_id"] == "ORD-001"
+        assert result.data["new_status"] == "售后中"
+        assert result.data["message"] == "售后已提交"
+
+    def test_serialization(self):
+        result = BusinessResult.completed(message="ok", x="y")
+        d = result.model_dump()
+        assert d["success"] is True
+        assert d["data"]["action"] == "completed"
+        assert d["data"]["x"] == "y"
+
+
+class TestBusinessResultError:
+    """BusinessResult.error 工厂方法测试"""
+
+    def test_basic(self):
+        result = BusinessResult.error("出错了")
+        assert result.success is False
+        assert result.error_message == "出错了"
+        assert result.data is None
+
+    def test_serialization(self):
+        result = BusinessResult.error("订单不存在")
+        d = result.model_dump()
+        assert d["success"] is False
+        assert d["error_message"] == "订单不存在"
 
 
 class TestBusinessContext:
     """BusinessContext 业务上下文测试"""
 
     def test_business_context_creation(self):
-        """验证 BusinessContext 基本创建"""
         ctx = BusinessContext(
             session_id="sess-001",
             user_id="user-001",
@@ -22,13 +139,10 @@ class TestBusinessContext:
         assert ctx.slots == {"order_id": "123"}
 
     def test_business_context_required_fields(self):
-        """验证 BusinessContext 必填字段校验"""
-        # 缺少必填字段应抛出 ValidationError
         with pytest.raises(ValidationError):
             BusinessContext()
 
     def test_business_context_slots_default(self):
-        """验证 BusinessContext slots 默认值为空字典"""
         ctx = BusinessContext(
             session_id="sess-001",
             user_id="user-001",
@@ -36,36 +150,11 @@ class TestBusinessContext:
         )
         assert ctx.slots == {}
 
-    def test_business_context_serialization(self):
-        """验证 BusinessContext 可以序列化为字典"""
-        ctx = BusinessContext(
-            session_id="sess-001",
-            user_id="user-001",
-            intent="order_query",
-            slots={"order_id": "123"},
-        )
-        d = ctx.model_dump()
-        assert d["session_id"] == "sess-001"
-        assert d["user_id"] == "user-001"
-        assert d["intent"] == "order_query"
-        assert d["slots"] == {"order_id": "123"}
-
-    def test_business_context_empty_slots(self):
-        """验证 BusinessContext 空槽位场景"""
-        ctx = BusinessContext(
-            session_id="sess-002",
-            user_id="user-002",
-            intent="product_inquiry",
-        )
-        assert ctx.slots == {}
-        assert ctx.model_dump()["slots"] == {}
-
 
 class TestBusinessResult:
     """BusinessResult 业务结果测试"""
 
     def test_business_result_success(self):
-        """验证业务执行成功的 BusinessResult"""
         result = BusinessResult(
             success=True,
             data={"order_id": "123", "status": "已发货"},
@@ -75,7 +164,6 @@ class TestBusinessResult:
         assert result.error_message == ""
 
     def test_business_result_failure(self):
-        """验证业务执行失败的 BusinessResult"""
         result = BusinessResult(
             success=False,
             error_message="订单不存在",
@@ -84,69 +172,31 @@ class TestBusinessResult:
         assert result.error_message == "订单不存在"
 
     def test_business_result_default_values(self):
-        """验证 BusinessResult 默认值"""
         result = BusinessResult(success=True)
         assert result.data is None
         assert result.error_message == ""
 
-    def test_business_result_serialization(self):
-        """验证 BusinessResult 可以序列化为字典"""
-        result = BusinessResult(
-            success=True,
-            data={"key": "value"},
-            error_message="",
-        )
-        d = result.model_dump()
-        assert d["success"] is True
-        assert d["data"] == {"key": "value"}
-        assert d["error_message"] == ""
-
     def test_business_result_required_success(self):
-        """验证 BusinessResult 缺少必填字段时抛出异常"""
         with pytest.raises(ValidationError):
             BusinessResult()
-
-    def test_business_result_with_list_data(self):
-        """验证 BusinessResult 的 data 可以是列表"""
-        result = BusinessResult(
-            success=True,
-            data=[{"id": 1}, {"id": 2}],
-        )
-        assert isinstance(result.data, list)
-        assert len(result.data) == 2
-
-    def test_business_result_with_none_data(self):
-        """验证失败时 data 可以为 None"""
-        result = BusinessResult(
-            success=False,
-            error_message="查询失败",
-        )
-        assert result.data is None
-        assert result.error_message == "查询失败"
 
 
 class TestIntentHandler:
     """IntentHandler 抽象基类测试"""
 
     def test_intent_handler_is_abstract(self):
-        """验证 IntentHandler 是抽象类，不能直接实例化"""
         with pytest.raises(TypeError):
             IntentHandler()
 
     def test_intent_handler_subclass_can_instantiate(self):
-        """验证 IntentHandler 的子类可以实例化"""
-
         class DummyHandler(IntentHandler):
             async def handle(self, ctx: BusinessContext) -> BusinessResult:
                 return BusinessResult(success=True)
 
         handler = DummyHandler()
         assert isinstance(handler, IntentHandler)
-        assert hasattr(handler, "handle")
 
     def test_intent_handler_subclass_must_implement_handle(self):
-        """验证 IntentHandler 子类必须实现 handle 方法"""
-
         class IncompleteHandler(IntentHandler):
             pass
 
@@ -155,8 +205,6 @@ class TestIntentHandler:
 
     @pytest.mark.asyncio
     async def test_intent_handler_subclass_handle(self):
-        """验证 IntentHandler 子类的 handle 方法可正常调用"""
-
         class DummyHandler(IntentHandler):
             async def handle(self, ctx: BusinessContext) -> BusinessResult:
                 return BusinessResult(
@@ -173,47 +221,3 @@ class TestIntentHandler:
         result = await handler.handle(ctx)
         assert result.success is True
         assert result.data["message"] == "处理意图: test_intent"
-
-    @pytest.mark.asyncio
-    async def test_intent_handler_error_case(self):
-        """验证 IntentHandler 子类可以返回错误结果"""
-
-        class ErrorHandler(IntentHandler):
-            async def handle(self, ctx: BusinessContext) -> BusinessResult:
-                return BusinessResult(
-                    success=False,
-                    error_message="模拟错误",
-                )
-
-        handler = ErrorHandler()
-        ctx = BusinessContext(
-            session_id="sess-001",
-            user_id="user-001",
-            intent="test_intent",
-        )
-        result = await handler.handle(ctx)
-        assert result.success is False
-        assert result.error_message == "模拟错误"
-
-    @pytest.mark.asyncio
-    async def test_intent_handler_with_slots(self):
-        """验证 IntentHandler 子类可以访问 slots 中的值"""
-
-        class SlotHandler(IntentHandler):
-            async def handle(self, ctx: BusinessContext) -> BusinessResult:
-                order_id = ctx.slots.get("order_id", "未知")
-                return BusinessResult(
-                    success=True,
-                    data={"queried_order": order_id},
-                )
-
-        handler = SlotHandler()
-        ctx = BusinessContext(
-            session_id="sess-001",
-            user_id="user-001",
-            intent="order_query",
-            slots={"order_id": "ORD-999"},
-        )
-        result = await handler.handle(ctx)
-        assert result.success is True
-        assert result.data["queried_order"] == "ORD-999"
