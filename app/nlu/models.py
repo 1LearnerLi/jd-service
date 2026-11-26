@@ -1,5 +1,7 @@
 """NLU 层核心数据模型"""
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SlotDef(BaseModel):
@@ -26,6 +28,12 @@ class IntentDefinition(BaseModel):
     description: str = Field(..., description="意图描述，用于 LLM 分类")
     required_slots: list[SlotDef] = Field(default_factory=list)
     optional_slots: list[SlotDef] = Field(default_factory=list)
+    handler: Any = Field(
+        default=None,
+        description="对应的 IntentHandler 子类，平台代码不直接引用",
+    )
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class NLUResult(BaseModel):

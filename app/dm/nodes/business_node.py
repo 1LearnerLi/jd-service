@@ -1,26 +1,18 @@
-"""业务节点 — 调用业务线的意图处理器"""
+"""业务节点 — 调用业务线的意图处理器
+
+通过 IntentRegistry 动态获取意图对应的 Handler 类，
+平台代码不直接导入任何业务线 Handler。
+"""
 from loguru import logger
 
 from app.business.base import BusinessContext, BusinessResult
-from app.business.ecommerce.handlers.order_query import OrderQueryHandler
-from app.business.ecommerce.handlers.postsale_return import PostsaleReturnHandler
-
-# 意图名 → 处理器类的映射表
-_handler_map: dict[str, type] = {
-    "order_query": OrderQueryHandler,
-    "postsale_return": PostsaleReturnHandler,
-}
-
-
-def get_handler_map() -> dict[str, type]:
-    """获取当前已注册的 handler 映射（供测试使用）"""
-    return _handler_map
+from app.nlu.registry import IntentRegistry
 
 
 async def business_node(state: dict) -> dict:
     """执行业务意图
 
-    根据 active_intent 查找对应的 IntentHandler 并执行。
+    根据 active_intent 通过 IntentRegistry 查找对应的 IntentHandler 并执行。
     Handler 内部按 required_slots 顺序逐槽位检查：
     - 槽位缺失 → 返回 BusinessResult.ask_slot()（含 options 列表供前端渲染）
     - 槽位齐全 → 执行并返回 BusinessResult.completed()
@@ -31,7 +23,7 @@ async def business_node(state: dict) -> dict:
     """
     active_intent = state.get("active_intent", "")
 
-    handler_cls = _handler_map.get(active_intent)
+    handler_cls = IntentRegistry.get_handler(active_intent)
     if handler_cls is None:
         logger.warning(f"未找到意图处理器: {active_intent}")
         return {

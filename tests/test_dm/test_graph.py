@@ -5,7 +5,8 @@ import pytest
 
 from app.dm.graph import build_dialog_graph
 from app.dm.state import DialogState
-from app.nlu.models import NLUResult
+from app.nlu.models import NLUResult, IntentDefinition
+from app.nlu.registry import IntentRegistry
 
 
 class TestGraphBuild:
@@ -41,6 +42,10 @@ class TestGraphBuild:
 class TestGraphIntegration:
     """图集成测试 — 模拟完整流程"""
 
+    def setup_method(self):
+        """每个测试前清空注册中心"""
+        IntentRegistry.clear()
+
     def _setup_mock_classifier(self, monkeypatch, intent_result: NLUResult):
         """搭建 mock 的意图分类器"""
         mock_classifier = MagicMock()
@@ -51,12 +56,22 @@ class TestGraphIntegration:
         )
         return mock_classifier
 
+    def _register_mock_handler(self, intent_name: str, handler_cls):
+        """向注册中心注册一个带 handler 的模拟意图"""
+        intent_def = IntentDefinition(
+            name=intent_name,
+            description="测试",
+            handler=handler_cls,
+        )
+        IntentRegistry.register_business("test", [intent_def])
+
     def _make_initial_state(self, **overrides) -> dict:
         """构造初始 DialogState"""
         state = {
             "session_id": "sess-test",
             "user_id": "user-test",
             "user_input": "测试输入",
+            "messages": [],
             "intents": {},
             "active_intent": "",
             "slots": {},
@@ -157,9 +172,7 @@ class TestGraphIntegration:
             )
         )
         handler_cls = MagicMock(return_value=mock_handler)
-
-        import app.dm.nodes.business_node as bn
-        bn._handler_map["order_query"] = handler_cls
+        self._register_mock_handler("order_query", handler_cls)
 
         # mock NLG engine
         mock_engine = MagicMock()
@@ -205,9 +218,7 @@ class TestGraphIntegration:
         mock_handler = MagicMock()
         mock_handler.handle = AsyncMock(return_value=mock_result)
         handler_cls = MagicMock(return_value=mock_handler)
-
-        import app.dm.nodes.business_node as bn
-        bn._handler_map["postsale_return"] = handler_cls
+        self._register_mock_handler("postsale_return", handler_cls)
 
         mock_engine = MagicMock()
         mock_engine.generate = AsyncMock(
@@ -246,9 +257,7 @@ class TestGraphIntegration:
             return_value=BusinessResult.error("订单 INVALID 不存在")
         )
         handler_cls = MagicMock(return_value=mock_handler)
-
-        import app.dm.nodes.business_node as bn
-        bn._handler_map["order_query"] = handler_cls
+        self._register_mock_handler("order_query", handler_cls)
 
         mock_engine = MagicMock()
         mock_engine.generate = AsyncMock(

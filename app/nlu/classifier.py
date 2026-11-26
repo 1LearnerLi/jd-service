@@ -79,16 +79,24 @@ class IntentClassifier:
 2. 如果用户要求转人工，intent 设为 "transfer_human"
 3. 从用户输入中尽可能提取所有槽位值
 4. missing_slots 只列出必填槽位中缺失的部分
-5. confidence 取值 0-1，表示你对分类结果的把握程度"""
+5. confidence 取值 0-1，表示你对分类结果的把握程度
+6. **槽位值识别**：如果用户输入是单个值（如订单号、选项值），且当前有活跃意图的缺失槽位，则将该值识别为缺失槽位的填充值，intent 保持与 active_intent 一致，不可重新分类为新意图"""
 
     def _build_user_prompt(
         self,
         user_input: str,
         current_slots: dict[str, object] | None = None,
         active_intent: str | None = None,
+        messages: list[dict[str, str]] | None = None,
     ) -> str:
-        """构造包含当前上下文的用户 prompt"""
+        """构造包含当前上下文和对话历史的用户 prompt"""
         context_parts = []
+        # 对话历史（最近的几轮消息）
+        if messages:
+            history_text = "\n".join(
+                f"[{m['role']}]: {m['content']}" for m in messages
+            )
+            context_parts.append(f"对话历史:\n{history_text}")
         if active_intent:
             context_parts.append(f"当前活跃意图: {active_intent}")
         if current_slots:
@@ -101,13 +109,15 @@ class IntentClassifier:
         user_input: str,
         current_slots: dict[str, object] | None = None,
         active_intent: str | None = None,
+        messages: list[dict[str, str]] | None = None,
     ) -> NLUResult:
         """对用户输入进行意图分类和槽位提取
 
         Args:
             user_input: 用户原始输入
             current_slots: 当前已收集的槽位（用于上下文继承）
-            active_intent: 当前活跃意图（用于意图延续判断）
+            active_intent: 当前活跃意图（用于意图延续判断和槽位值识别）
+            messages: 对话历史，格式 [{"role": "user"|"assistant", "content": "..."}]
 
         Returns:
             NLUResult: 包含意图名、置信度、已提取槽位和缺失必填槽位
@@ -117,6 +127,7 @@ class IntentClassifier:
             user_input,
             current_slots or {},
             active_intent or "",
+            messages or [],
         )
 
         messages = [

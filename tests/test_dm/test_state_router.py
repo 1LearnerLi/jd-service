@@ -42,6 +42,7 @@ class TestDialogState:
             "session_id": "sess-001",
             "user_id": "user-001",
             "user_input": "查订单",
+            "messages": [],
             "intents": {},
             "active_intent": "",
             "slots": {},
@@ -53,6 +54,7 @@ class TestDialogState:
         assert state["session_id"] == "sess-001"
         assert state["user_id"] == "user-001"
         assert state["user_input"] == "查订单"
+        assert state["messages"] == []
         assert state["intents"] == {}
         assert state["active_intent"] == ""
         assert state["slots"] == {}
@@ -67,6 +69,10 @@ class TestDialogState:
             "session_id": "sess-002",
             "user_id": "user-002",
             "user_input": "ORD-001",
+            "messages": [
+                {"role": "user", "content": "查订单"},
+                {"role": "assistant", "content": "请选择要查询的订单"},
+            ],
             "intents": {
                 "order_query": {
                     "name": "order_query",
@@ -86,6 +92,30 @@ class TestDialogState:
         assert state["slots"]["order_id"] == "ORD-001"
         assert state["intents"]["order_query"]["confidence"] == 0.9
         assert state["business_result"]["action"] == "completed"
+
+    def test_dialog_state_with_messages(self):
+        """验证 messages 字段格式"""
+        messages = [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "您好，有什么可以帮您的？"},
+            {"role": "user", "content": "查订单"},
+        ]
+        state: DialogState = {
+            "session_id": "sess-003",
+            "user_id": "user-003",
+            "user_input": "ORD-001",
+            "messages": messages,
+            "intents": {},
+            "active_intent": "order_query",
+            "slots": {},
+            "missing_slots": ["order_id"],
+            "business_result": None,
+            "final_response": "",
+            "should_fallback": False,
+        }
+        assert len(state["messages"]) == 3
+        assert state["messages"][0]["role"] == "user"
+        assert state["messages"][1]["role"] == "assistant"
 
 
 class TestIsPlatformIntent:

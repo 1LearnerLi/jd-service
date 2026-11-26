@@ -32,12 +32,14 @@ async def nlu_node(state: dict) -> dict:
     user_input = state.get("user_input", "")
     current_slots = state.get("slots", {})
     active_intent = state.get("active_intent", "")
+    messages = state.get("messages", [])
 
     classifier = get_classifier()
     result = await classifier.classify(
         user_input=user_input,
         current_slots=current_slots,
         active_intent=active_intent,
+        messages=messages,
     )
 
     # 合并新提取的槽位到已有槽位

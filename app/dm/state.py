@@ -20,6 +20,7 @@ class DialogState(TypedDict):
 
     字段说明：
     - session_id / user_id / user_input: 由 API 层在入口注入
+    - messages: 对话历史，格式 [{"role": "user"|"assistant", "content": "..."}]
     - intents: 所有已识别意图的注册表，key 为意图名
     - active_intent: 当前活跃意图名，由 NLU 节点产出
     - slots: 已填充的槽位键值对，由 NLU 节点累积更新
@@ -31,6 +32,7 @@ class DialogState(TypedDict):
     session_id: str
     user_id: str
     user_input: str
+    messages: list[dict[str, str]]
     intents: dict[str, IntentContext]
     active_intent: str
     slots: dict[str, object]

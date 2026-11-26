@@ -157,10 +157,16 @@ class TestNluNode:
             mock_classifier,
         )
 
+        messages = [
+            {"role": "user", "content": "查订单"},
+            {"role": "assistant", "content": "请选择要查询的订单"},
+        ]
+
         state = {
             "user_input": "999",
             "slots": {"order_id": "888"},
             "active_intent": "order_query",
+            "messages": messages,
         }
 
         await nlu_node(state)
@@ -170,6 +176,7 @@ class TestNluNode:
             user_input="999",
             current_slots={"order_id": "888"},
             active_intent="order_query",
+            messages=messages,
         )
 
     @pytest.mark.asyncio

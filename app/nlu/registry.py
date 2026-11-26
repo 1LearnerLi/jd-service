@@ -52,6 +52,18 @@ class IntentRegistry:
         return [s.name for s in intent.required_slots]
 
     @classmethod
+    def get_handler(cls, intent_name: str) -> type | None:
+        """按意图名获取对应的 Handler 类
+
+        Handler 类由业务线在 IntentDefinition.handler 中绑定，
+        平台代码不直接导入任何业务线 Handler。
+        """
+        intent = cls.get_intent_by_name(intent_name)
+        if intent is None:
+            return None
+        return intent.handler
+
+    @classmethod
     def clear(cls) -> None:
         """清空注册中心（用于测试）"""
         cls._business_intents = {}
