@@ -20,7 +20,17 @@ ECOMMERCE_INTENTS: list[IntentDefinition] = [
             SlotDef(
                 name="order_id",
                 description="订单号",
-                ask_prompt="请提供您要申请售后的订单号",
+                ask_prompt="请选择要申请售后的订单",
+            ),
+            SlotDef(
+                name="postsale_type",
+                description="售后类型：仅退款或退货退款",
+                ask_prompt="请选择售后方式",
+            ),
+            SlotDef(
+                name="postsale_reason",
+                description="售后原因",
+                ask_prompt="请选择售后原因",
             ),
         ],
     ),

@@ -81,6 +81,19 @@ class OrderRepo:
             # 实际业务中 postsale_reason 表存储了所有售后原因
             pass  # 由 handler 层提供
 
+    async def update_order_status(
+        self, order_id: str, new_status: str
+    ) -> None:
+        """更新订单状态"""
+        async with EcoSessionLocal() as db:
+            await db.execute(
+                update(OrderInfo)
+                .where(OrderInfo.order_id == order_id)
+                .values(order_status=new_status)
+            )
+            await db.commit()
+            logger.info(f"订单状态更新: {order_id} → {new_status}")
+
     async def create_postsale(
         self,
         order_detail_id: str,

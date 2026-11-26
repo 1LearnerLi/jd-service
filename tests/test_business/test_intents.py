@@ -60,16 +60,23 @@ class TestOrderQueryIntent:
 class TestPostsaleReturnIntent:
     """postsale_return 意图定义详细测试"""
 
-    def test_postsale_return_has_required_slots(self):
-        """验证 postsale_return 有必填槽位"""
+    def test_postsale_return_has_three_required_slots(self):
+        """验证 postsale_return 有 3 个必填槽位"""
         intent = next(i for i in ECOMMERCE_INTENTS if i.name == "postsale_return")
-        assert len(intent.required_slots) == 1
-        assert intent.required_slots[0].name == "order_id"
+        assert len(intent.required_slots) == 3
+        names = [s.name for s in intent.required_slots]
+        assert names == ["order_id", "postsale_type", "postsale_reason"]
 
     def test_postsale_return_no_optional_slots(self):
         """验证 postsale_return 没有可选槽位"""
         intent = next(i for i in ECOMMERCE_INTENTS if i.name == "postsale_return")
         assert len(intent.optional_slots) == 0
+
+    def test_postsale_return_slots_have_ask_prompt(self):
+        """验证所有槽位都有追问提示"""
+        intent = next(i for i in ECOMMERCE_INTENTS if i.name == "postsale_return")
+        for slot in intent.required_slots:
+            assert slot.ask_prompt != ""
 
 
 class TestProductInquiryIntent:
