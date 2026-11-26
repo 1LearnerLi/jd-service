@@ -89,8 +89,8 @@
 | 意图名 | 描述 | 必填槽位 | 可选槽位 |
 |--------|------|----------|----------|
 | `order_query` | 查询订单详情 | `order_id` | 无 |
-| `postsale_return` | 售后退货/退款 | `order_id` | 无 |
-| `product_inquiry` | 商品咨询（RAG） | 无 | `sku_id`, `sku_name` |
+| `postsale_return` | 售后退货/退款 | `order_id`, `postsale_type`, `postsale_reason` | 无 |
+| `product_inquiry` | 商品咨询（RAG） | `query` | 无 |
 
 ### 意图注册机制
 
@@ -135,7 +135,27 @@ entry → nlu → [条件路由]
 
 - `IntentHandler`: 意图处理器，内部可自行查询业务数据库补充槽位并执行业务逻辑
 - `BusinessContext`: 业务上下文（session_id, user_id, intent, slots）
-- `BusinessResult`: 业务执行结果（success, data, error_message）
+- `BusinessResult`: 业务执行结果（success, data, error_message），提供三个工厂方法：
+  - `BusinessResult.ask_slot(slot_to_fill, options, message)` — 需要用户选择一个槽位值
+  - `BusinessResult.completed(message, **extra)` — 业务处理完成
+  - `BusinessResult.error(message)` — 业务处理失败
+- `OptionItem(label, value, disabled=False)`: 统一选项条目，`ask_slot` 时使用。前端据此渲染按钮列表
+
+### 槽位驱动模式
+
+意图处理器按 required_slots 顺序逐槽位检查，缺失时返回 `ask_slot` 让前端渲染选项按钮，用户点击后回传槽位值，所有槽位齐全后执行并返回 `completed`。
+
+`ask_slot` 返回的统一 data 结构：
+```json
+{
+    "action": "ask_slot",
+    "message": "请选择要申请售后的订单",
+    "slot_to_fill": "order_id",
+    "options": [
+        {"label": "ORD-001（已签收）", "value": "ORD-001", "disabled": false}
+    ]
+}
+```
 
 ### 电商业务线
 

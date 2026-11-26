@@ -98,9 +98,50 @@ uv run uvicorn app.main:app --reload       # 开发服务器
 **两级意图：**
 
 - **平台意图** (`nlu/platform_intents.py`)：`unknown`、`transfer_human` — 适用于所有业务线。DM 短接到 fallback 节点。
-- **业务意图** (`business/<line>/intents.py`)：`order_query`、`logistics_track`、`postsale_return`、`logistics_complaint`、`product_inquiry`等 — 特定于业务线。
+- **业务意图** (`business/<line>/intents.py`)：`order_query`、`postsale_return`、`product_inquiry` — 特定于业务线。
 
 意图管理使用 **字典 + active_intent**（非栈式）：`DialogState.intents: dict[str, IntentContext]` 保存所有意图，`active_intent: str` 指向当前活跃的意图。
+
+## 业务层
+
+### 意图处理器
+
+每个业务意图对应一个 `IntentHandler` 子类，位于 `business/<line>/handlers/` 下。
+
+**槽位驱动模式**：处理器按 required_slots 的顺序逐槽位检查，缺失时返回 `BusinessResult.ask_slot()` 让前端渲染选项按钮，所有槽位齐全后执行并返回 `BusinessResult.completed()`。
+
+**统一选项结构**：`BusinessResult.ask_slot()` 返回统一的 `ask_slot` 结构：
+```python
+# action="ask_slot" 时的 data 结构
+{
+    "action": "ask_slot",
+    "message": "请选择要申请售后的订单",   # 提示文字
+    "slot_to_fill": "order_id",           # 需要填充的槽位名
+    "options": [                          # 统一 OptionItem 列表
+        {
+            "label": "ORD-001（已签收）",  # 展示文字
+            "value": "ORD-001",           # 回传的槽位值
+            "disabled": False,            # 是否置灰
+        },
+    ],
+}
+```
+
+**工厂方法**（定义在 `app/business/base.py`）：
+- `BusinessResult.ask_slot(slot_to_fill, options, message)` — 需要用户选择一个槽位
+- `BusinessResult.completed(message, **extra)` — 业务处理完成
+- `BusinessResult.error(message)` — 业务处理失败
+
+**选项模型**：
+- `OptionItem(label, value, disabled=False)` — 统一的前端选项条目
+
+### 意图定义
+
+| 意图名 | 描述 | 必填槽位 | 处理器 |
+|--------|------|----------|--------|
+| `order_query` | 订单详情查询 | `order_id` | `OrderQueryHandler` |
+| `postsale_return` | 售后申请 | `order_id`, `postsale_type`, `postsale_reason` | `PostsaleReturnHandler` |
+| `product_inquiry` | 商品咨询 | `query` | (待实现) |
 
 ## NLG 策略
 

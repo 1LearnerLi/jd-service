@@ -995,8 +995,26 @@ git commit -m "feat: 添加 LLM 客户端封装"
 **Interfaces:**
 - Produces:
   - `BusinessContext(session_id, user_id, intent, slots)`
-  - `BusinessResult(success, data, error_message)`
+  - `BusinessResult(success, data, error_message)` + 三个工厂方法
+  - `OptionItem(label, value, disabled=False)` — 统一选项条目
   - `IntentHandler.handle(ctx) → BusinessResult` (抽象类)
+
+**工厂方法（`BusinessResult` 类方法）：**
+- `BusinessResult.ask_slot(slot_to_fill, options, message)` — 需要用户选择一个槽位值，返回统一 `ask_slot` 结构
+- `BusinessResult.completed(message, **extra)` — 业务处理完成，extra 合并到 data
+- `BusinessResult.error(message)` — 业务处理失败
+
+**`ask_slot` 统一 data 结构：**
+```json
+{
+    "action": "ask_slot",
+    "message": "提示文字",
+    "slot_to_fill": "要填充的槽位名",
+    "options": [
+        {"label": "展示文字", "value": "回传值", "disabled": false}
+    ]
+}
+```
 
 - [ ] **Step 1: 创建 app/business/base.py**
 
@@ -1222,11 +1240,31 @@ git commit -m "feat: 添加电商业务线配置、ORM 和数据仓库"
 - Create: `app/business/ecommerce/handlers/postsale_return.py`
 
 **Interfaces:**
-- Consumes: `IntentRegistry`, `IntentHandler`, `BusinessContext`, `BusinessResult`, `OrderRepo`
+- Consumes: `IntentRegistry`, `IntentHandler`, `BusinessContext`, `BusinessResult`, `OptionItem`, `OrderRepo`
 - Produces:
-  - `ECOMMERCE_INTENTS`: 电商业务线意图定义
-  - `OrderQueryHandler.handle(ctx) → BusinessResult`
-  - `PostsaleReturnHandler.handle(ctx) → BusinessResult`
+  - `ECOMMERCE_INTENTS`: 电商业务线意图定义（3 个意图，每个意图的 required_slots 逐槽位驱动）
+  - `OrderQueryHandler.handle(ctx) → BusinessResult` — 槽位驱动：order_id 缺失时返回 ask_slot（最近 5 条订单列表），齐全后查询并返回 completed
+  - `PostsaleReturnHandler.handle(ctx) → BusinessResult` — 三槽位驱动：order_id → postsale_type → postsale_reason 逐项追问，全齐后 update_order_status("售后中") 并返回 completed
+
+**意图定义（最终版本）：**
+
+| 意图 | required_slots | 说明 |
+|------|---------------|------|
+| `order_query` | `order_id` | order_id 缺失时返回最近 5 条订单让用户选 |
+| `postsale_return` | `order_id`, `postsale_type`, `postsale_reason` | 逐槽位追问，可售后状态：已付款/已发货/已签收 |
+| `product_inquiry` | `query` | 用户原问题作为槽位值 |
+
+**槽位驱动流程（以 postsale_return 为例）：**
+
+```
+handle(ctx)
+  ├─ slots 中无 order_id       → ask_slot("order_id", [最近5条订单], "请选择订单")
+  ├─ slots 中无 postsale_type  → ask_slot("postsale_type", [{仅退款, 退货退款}], "请选择方式")
+  ├─ slots 中无 postsale_reason → ask_slot("postsale_reason", [6个原因], "请选择原因")
+  └─ 三槽位齐全                → 校验订单 → update_order_status("售后中") → completed("售后已提交", ...)
+```
+
+**order_query 同样采用槽位驱动**：order_id 缺失时不再返回错误，而是返回 `ask_slot` 让用户选择订单。
 
 - [ ] **Step 1: 创建 app/business/ecommerce/intents.py**
 
@@ -1242,7 +1280,7 @@ ECOMMERCE_INTENTS: list[IntentDefinition] = [
             SlotDef(
                 name="order_id",
                 description="订单号",
-                ask_prompt="请提供您的订单号，我帮您查询详情",
+                ask_prompt="请选择要查询的订单",
             ),
         ],
     ),
@@ -1253,23 +1291,28 @@ ECOMMERCE_INTENTS: list[IntentDefinition] = [
             SlotDef(
                 name="order_id",
                 description="订单号",
-                ask_prompt="请提供您要申请售后的订单号",
+                ask_prompt="请选择要申请售后的订单",
+            ),
+            SlotDef(
+                name="postsale_type",
+                description="售后类型：仅退款或退货退款",
+                ask_prompt="请选择售后方式",
+            ),
+            SlotDef(
+                name="postsale_reason",
+                description="售后原因",
+                ask_prompt="请选择售后原因",
             ),
         ],
     ),
     IntentDefinition(
         name="product_inquiry",
         description="用户咨询商品信息，包括商品价格、规格、库存、使用说明等",
-        optional_slots=[
+        required_slots=[
             SlotDef(
-                name="sku_id",
-                description="商品 SKU ID",
-                ask_prompt="请提供商品编号",
-            ),
-            SlotDef(
-                name="sku_name",
-                description="商品名称",
-                ask_prompt="请问您想了解哪款商品？",
+                name="query",
+                description="用户的原始问题",
+                ask_prompt="请问您想了解什么商品信息？",
             ),
         ],
     ),
@@ -1282,39 +1325,59 @@ ECOMMERCE_INTENTS: list[IntentDefinition] = [
 """订单查询意图处理器"""
 from loguru import logger
 
-from app.business.base import IntentHandler, BusinessContext, BusinessResult
-from app.business.ecommerce.repository.order_repo import OrderRepo
+from app.business.base import (
+    IntentHandler,
+    BusinessContext,
+    BusinessResult,
+    OptionItem,
+)
 
 
 class OrderQueryHandler(IntentHandler):
-    """订单查询处理器"""
+    """订单查询处理器 — 槽位驱动"""
 
-    def __init__(self):
-        self._repo = OrderRepo()
+    def __init__(self, repo=None):
+        from app.business.ecommerce.repository.order_repo import OrderRepo
+        self._repo = repo if repo is not None else OrderRepo()
 
     async def handle(self, ctx: BusinessContext) -> BusinessResult:
-        """查询订单详情"""
         order_id = str(ctx.slots.get("order_id", ""))
         if not order_id:
-            return BusinessResult(
-                success=False,
-                error_message="缺少订单号，无法查询",
-            )
+            return await self._ask_for_order(ctx)
+        return await self._query(ctx)
 
+    async def _ask_for_order(self, ctx: BusinessContext) -> BusinessResult:
+        """order_id 缺失：返回最近订单列表"""
+        try:
+            orders = await self._repo.get_orders_by_user(ctx.user_id, limit=5)
+            options = [
+                OptionItem(
+                    label=f"{o.order_id}（{o.order_status}）",
+                    value=o.order_id,
+                )
+                for o in orders
+            ]
+            return BusinessResult.ask_slot(
+                slot_to_fill="order_id",
+                options=options,
+                message="请选择要查询的订单",
+            )
+        except Exception as e:
+            logger.error(f"查询用户订单失败: {e}")
+            return BusinessResult.error("查询订单时出现错误，请稍后重试")
+
+    async def _query(self, ctx: BusinessContext) -> BusinessResult:
+        """order_id 齐全：查询订单详情"""
+        order_id = str(ctx.slots.get("order_id", ""))
         try:
             order = await self._repo.get_order_by_id(order_id)
             if order is None:
-                return BusinessResult(
-                    success=False,
-                    error_message=f"订单 {order_id} 不存在，请确认订单号是否正确",
+                return BusinessResult.error(
+                    f"订单 {order_id} 不存在，请确认订单号是否正确"
                 )
-
             details = await self._repo.get_order_detail_by_order(order_id)
-
-            # 构造返回数据
             detail_list = []
             for d in details:
-                # 同时查 SKU 信息补全
                 sku = await self._repo.get_sku_by_id(d.sku_id)
                 detail_list.append({
                     "sku_id": d.sku_id,
@@ -1325,7 +1388,6 @@ class OrderQueryHandler(IntentHandler):
                     "discount_amount": float(d.discount_amount),
                     "final_amount": float(d.final_amount),
                 })
-
             order_data = {
                 "order_id": order.order_id,
                 "order_status": order.order_status,
@@ -1334,100 +1396,161 @@ class OrderQueryHandler(IntentHandler):
                 "delivered_time": order.delivered_time.isoformat() if order.delivered_time else "",
                 "details": detail_list,
             }
-
             logger.info(f"订单查询成功: {order_id}")
-            return BusinessResult(success=True, data=order_data)
-
+            return BusinessResult.completed(
+                message=f"📋 订单 {order_id} 详情已加载",
+                **order_data,
+            )
         except Exception as e:
             logger.error(f"订单查询失败: {e}")
-            return BusinessResult(
-                success=False,
-                error_message="查询订单时出现错误，请稍后重试",
-            )
+            return BusinessResult.error("查询订单时出现错误，请稍后重试")
 ```
 
 - [ ] **Step 3: 创建 app/business/ecommerce/handlers/postsale_return.py**
 
 ```python
-"""售后申请意图处理器"""
+"""售后申请意图处理器 — 三槽位逐槽位驱动"""
 from loguru import logger
 
-from app.business.base import IntentHandler, BusinessContext, BusinessResult
-from app.business.ecommerce.repository.order_repo import OrderRepo
+from app.business.base import (
+    IntentHandler,
+    BusinessContext,
+    BusinessResult,
+    OptionItem,
+)
+
+_REFUNDABLE_STATUSES = frozenset({"已付款", "已发货", "已签收"})
+
+_POSTSALE_TYPES = {
+    "refund_only": "仅退款",
+    "return_refund": "退货退款",
+}
+
+_POSTSALE_REASONS = [
+    "7天无理由",
+    "商品瑕疵/破损",
+    "发错货",
+    "商品与描述不符",
+    "质量问题",
+    "不喜欢/不想要了",
+]
 
 
 class PostsaleReturnHandler(IntentHandler):
     """售后申请处理器"""
 
-    def __init__(self):
-        self._repo = OrderRepo()
+    def __init__(self, repo=None):
+        from app.business.ecommerce.repository.order_repo import OrderRepo
+        self._repo = repo if repo is not None else OrderRepo()
 
     async def handle(self, ctx: BusinessContext) -> BusinessResult:
-        """处理售后申请 — 查询订单并返回可售后信息"""
-        order_id = str(ctx.slots.get("order_id", ""))
-        if not order_id:
-            return BusinessResult(
-                success=False,
-                error_message="缺少订单号，无法处理售后",
-            )
+        slots = ctx.slots
 
+        if not slots.get("order_id"):
+            return await self._ask_for_order(ctx)
+        if not slots.get("postsale_type"):
+            order_check = await self._check_order(ctx)
+            if not order_check.success:
+                return order_check
+            return self._ask_for_type()
+        if not slots.get("postsale_reason"):
+            return self._ask_for_reason()
+
+        return await self._execute(ctx)
+
+    async def _ask_for_order(self, ctx: BusinessContext) -> BusinessResult:
+        try:
+            orders = await self._repo.get_orders_by_user(ctx.user_id, limit=5)
+            options = [
+                OptionItem(
+                    label=f"{o.order_id}（{o.order_status}）",
+                    value=o.order_id,
+                    disabled=o.order_status not in _REFUNDABLE_STATUSES,
+                )
+                for o in orders
+            ]
+            return BusinessResult.ask_slot(
+                slot_to_fill="order_id",
+                options=options,
+                message="请选择要申请售后的订单",
+            )
+        except Exception as e:
+            logger.error(f"查询用户订单失败: {e}")
+            return BusinessResult.error("查询订单时出现错误，请稍后重试")
+
+    def _ask_for_type(self) -> BusinessResult:
+        options = [OptionItem(label=v, value=k) for k, v in _POSTSALE_TYPES.items()]
+        return BusinessResult.ask_slot(
+            slot_to_fill="postsale_type",
+            options=options,
+            message="请选择售后方式",
+        )
+
+    def _ask_for_reason(self) -> BusinessResult:
+        options = [OptionItem(label=r, value=r) for r in _POSTSALE_REASONS]
+        return BusinessResult.ask_slot(
+            slot_to_fill="postsale_reason",
+            options=options,
+            message="请选择售后原因",
+        )
+
+    async def _check_order(self, ctx: BusinessContext) -> BusinessResult:
+        order_id = str(ctx.slots.get("order_id", ""))
         try:
             order = await self._repo.get_order_by_id(order_id)
             if order is None:
-                return BusinessResult(
-                    success=False,
-                    error_message=f"订单 {order_id} 不存在，请确认订单号",
-                )
-
-            # 校验订单是否属于当前用户
+                return BusinessResult.error(f"订单 {order_id} 不存在，请确认订单号")
             if order.user_id != ctx.user_id:
-                return BusinessResult(
-                    success=False,
-                    error_message="该订单不属于当前用户",
+                return BusinessResult.error("该订单不属于当前用户")
+            if order.order_status not in _REFUNDABLE_STATUSES:
+                return BusinessResult.error(
+                    f"订单状态为「{order.order_status}」，"
+                    f"仅已付款/已发货/已签收的订单可申请售后"
                 )
-
-            if order.order_status not in ("已签收", "已发货"):
-                return BusinessResult(
-                    success=False,
-                    error_message=f"订单状态为「{order.order_status}」，暂不支持申请售后",
-                )
-
-            details = await self._repo.get_order_detail_by_order(order_id)
-
-            # 列出售后候选商品
-            items = []
-            for d in details:
-                sku = await self._repo.get_sku_by_id(d.sku_id)
-                items.append({
-                    "order_detail_id": d.order_detail_id,
-                    "sku_id": d.sku_id,
-                    "sku_name": d.sku_name,
-                    "sku_count": d.sku_count,
-                    "final_amount": float(d.final_amount),
-                })
-
-            order_data = {
-                "order_id": order.order_id,
-                "order_status": order.order_status,
-                "items": items,
-            }
-
-            logger.info(f"售后查询成功: {order_id}, 可售后商品数: {len(items)}")
-            return BusinessResult(success=True, data=order_data)
-
+            return BusinessResult(success=True)
         except Exception as e:
-            logger.error(f"售后处理失败: {e}")
-            return BusinessResult(
-                success=False,
-                error_message="处理售后申请时出现错误，请稍后重试",
+            logger.error(f"校验订单失败: {e}")
+            return BusinessResult.error("查询订单时出现错误，请稍后重试")
+
+    async def _execute(self, ctx: BusinessContext) -> BusinessResult:
+        order_id = str(ctx.slots.get("order_id", ""))
+        postsale_type = str(ctx.slots.get("postsale_type", "refund_only"))
+        postsale_reason = str(ctx.slots.get("postsale_reason", ""))
+
+        if postsale_type not in _POSTSALE_TYPES:
+            return BusinessResult.error(f"不支持的售后方式: {postsale_type}")
+
+        order_check = await self._check_order(ctx)
+        if not order_check.success:
+            return order_check
+
+        try:
+            await self._repo.update_order_status(order_id, "售后中")
+            type_label = _POSTSALE_TYPES[postsale_type]
+            logger.info(f"售后完成: 订单={order_id}, 方式={type_label}, 原因={postsale_reason}")
+            return BusinessResult.completed(
+                message=(
+                    f"售后申请已提交！\n"
+                    f"订单号：{order_id}\n"
+                    f"售后方式：{type_label}\n"
+                    f"售后原因：{postsale_reason}\n"
+                    f"当前状态：售后中"
+                ),
+                order_id=order_id,
+                postsale_type=type_label,
+                postsale_reason=postsale_reason,
+                new_status="售后中",
             )
+        except Exception as e:
+            logger.error(f"售后执行失败: {e}")
+            return BusinessResult.error("处理售后申请时出现错误，请稍后重试")
 ```
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add app/business/ecommerce/intents.py app/business/ecommerce/handlers/
-git commit -m "feat: 添加电商业务线意图注册和处理器"
+git commit -m "feat: 添加电商业务线意图注册和槽位驱动处理器"
 ```
 
 ---
