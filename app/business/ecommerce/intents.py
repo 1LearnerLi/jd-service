@@ -27,16 +27,11 @@ ECOMMERCE_INTENTS: list[IntentDefinition] = [
     IntentDefinition(
         name="product_inquiry",
         description="用户咨询商品信息，包括商品价格、规格、库存、使用说明等",
-        optional_slots=[
+        required_slots=[
             SlotDef(
-                name="sku_id",
-                description="商品 SKU ID",
-                ask_prompt="请提供商品编号",
-            ),
-            SlotDef(
-                name="sku_name",
-                description="商品名称",
-                ask_prompt="请问您想了解哪款商品？",
+                name="query",
+                description="用户的原始问题",
+                ask_prompt="请问您想了解什么商品信息？",
             ),
         ],
     ),

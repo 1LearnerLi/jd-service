@@ -54,3 +54,24 @@ class SkuInfo(EcommerceBase):
     sku_price: Mapped[float] = mapped_column(Numeric(10, 2))
     sku_category: Mapped[str] = mapped_column(String(20))
     sku_count: Mapped[int] = mapped_column(Integer)
+
+
+class Postsale(EcommerceBase):
+    """售后表 — 映射 postsale"""
+    __tablename__ = "postsale"
+
+    postsale_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    create_time: Mapped[datetime] = mapped_column(DateTime)
+    complete_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    order_detail_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("order_detail.order_detail_id")
+    )
+    refund_amount: Mapped[float] = mapped_column(Numeric(10, 2), default=0.00)
+    postsale_type: Mapped[str] = mapped_column(String(10))  # 退款/退货/换货
+    postsale_reason: Mapped[str] = mapped_column(String(500))
+    postsale_status: Mapped[str] = mapped_column(
+        String(20), ForeignKey("postsale_status.postsale_status")
+    )
+    receive_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("receive_info.receive_id")
+    )

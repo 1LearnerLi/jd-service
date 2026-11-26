@@ -75,18 +75,22 @@ class TestPostsaleReturnIntent:
 class TestProductInquiryIntent:
     """product_inquiry 意图定义详细测试"""
 
-    def test_product_inquiry_no_required_slots(self):
-        """验证 product_inquiry 没有必填槽位"""
+    def test_product_inquiry_has_query_slot(self):
+        """验证 product_inquiry 有 query 必填槽位"""
         intent = next(i for i in ECOMMERCE_INTENTS if i.name == "product_inquiry")
-        assert len(intent.required_slots) == 0
+        assert len(intent.required_slots) == 1
+        assert intent.required_slots[0].name == "query"
 
-    def test_product_inquiry_has_optional_slots(self):
-        """验证 product_inquiry 有可选槽位"""
+    def test_product_inquiry_slot_has_ask_prompt(self):
+        """验证 product_inquiry 的 query 槽位有追问提示"""
         intent = next(i for i in ECOMMERCE_INTENTS if i.name == "product_inquiry")
-        assert len(intent.optional_slots) == 2
-        names = [s.name for s in intent.optional_slots]
-        assert "sku_id" in names
-        assert "sku_name" in names
+        slot = intent.required_slots[0]
+        assert slot.ask_prompt != ""
+
+    def test_product_inquiry_no_optional_slots(self):
+        """验证 product_inquiry 没有可选槽位（query 已改为必填）"""
+        intent = next(i for i in ECOMMERCE_INTENTS if i.name == "product_inquiry")
+        assert len(intent.optional_slots) == 0
 
 
 class TestEcommerceIntentRegistration:
