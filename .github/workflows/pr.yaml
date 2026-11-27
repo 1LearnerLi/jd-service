@@ -65,18 +65,18 @@ jobs:
           # 如果已有 .claude.json，则合并；否则新建
           if [ -f /home/runner/.claude.json ]; then
             # 使用 Python 合并 JSON（Ubuntu runner 自带 Python）
-            python3 -c "
-import json, os
-path = '/home/runner/.claude.json'
-data = {}
-if os.path.exists(path) and os.path.getsize(path) > 0:
-    with open(path) as f:
-        data = json.load(f)
-data.setdefault('projects', {})
-data['projects']['/home/runner/work/jd-service/jd-service'] = {'hasTrustDialogAccepted': True}
-with open(path, 'w') as f:
-    json.dump(data, f, indent=2)
-"
+            python3 << 'PYEOF'
+          import json, os
+          path = '/home/runner/.claude.json'
+          data = {}
+          if os.path.exists(path) and os.path.getsize(path) > 0:
+              with open(path) as f:
+                  data = json.load(f)
+          data.setdefault('projects', {})
+          data['projects']['/home/runner/work/jd-service/jd-service'] = {'hasTrustDialogAccepted': True}
+          with open(path, 'w') as f:
+              json.dump(data, f, indent=2)
+          PYEOF
           else
             echo '{"projects":{"/home/runner/work/jd-service/jd-service":{"hasTrustDialogAccepted":true}}}' > /home/runner/.claude.json
           fi
