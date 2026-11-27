@@ -289,11 +289,13 @@ git commit -m "feat: 添加平台数据库引擎"
 **Interfaces:**
 - Consumes: `Base` from `app.core.database`
 - Produces:
-  - `Session` ORM model (id, user_id, title, status, created_at, updated_at)
+  - `Session` ORM model (id, user_id, title, status, intents_json, created_at, updated_at)
   - `Message` ORM model (id, session_id, role, content, intent, slots_json, created_at)
   - `SessionService.create_session(user_id) → Session`
   - `SessionService.list_sessions(user_id, limit=10) → list[Session]`
   - `SessionService.get_session(session_id) → Session | None`
+  - `SessionService.save_intents_snapshot(db, session_id, intents) → None`
+  - `SessionService.load_intents_snapshot(db, session_id) → dict | None`
   - `MessageService.add_message(session_id, role, content, intent, slots) → Message`
   - `MessageService.list_messages(session_id) → list[Message]`
 
@@ -311,6 +313,7 @@ def test_session_model_fields():
     assert hasattr(Session, "user_id")
     assert hasattr(Session, "title")
     assert hasattr(Session, "status")
+    assert hasattr(Session, "intents_json")
     assert hasattr(Session, "created_at")
     assert hasattr(Session, "updated_at")
 
@@ -358,6 +361,10 @@ class Session(Base):
         Enum("active", "closed", name="session_status"),
         nullable=False,
         default="active",
+    )
+    intents_json: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True,
+        comment="会话意图状态快照: {intent_name: {status, slots, confidence, ...}}"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
@@ -444,6 +451,32 @@ class SessionService:
             select(Session).where(Session.id == session_id)
         )
         return result.scalar_one_or_none()
+
+    @staticmethod
+    async def save_intents_snapshot(
+        db: AsyncSession, session_id: str, intents: dict
+    ) -> None:
+        """将意图容器快照存入 Session.intents_json"""
+        from app.dm.intent_controller import IntentController
+        from sqlalchemy import update as sql_update
+        snapshot = IntentController.to_snapshot(intents)
+        await db.execute(
+            sql_update(Session)
+            .where(Session.id == session_id)
+            .values(intents_json=snapshot)
+        )
+        await db.commit()
+
+    @staticmethod
+    async def load_intents_snapshot(
+        db: AsyncSession, session_id: str
+    ) -> dict | None:
+        """从 Session.intents_json 加载意图容器快照"""
+        from app.dm.intent_controller import IntentController
+        session = await SessionService.get_session(db, session_id)
+        if session and session.intents_json:
+            return IntentController.from_snapshot(session.intents_json)
+        return None
 
 
 class MessageService:
@@ -630,7 +663,7 @@ git commit -m "chore: 配置 Alembic 数据库迁移"
 - Produces:
   - `SlotDef(name, description, ask_prompt)`
   - `IntentDefinition(name, description, required_slots, optional_slots)`
-  - `NLUResult(intent, confidence, slots, missing_slots)`
+  - `NLUResult(action, target_intent, confidence, slots_update)` — 增量式意图变化
   - `IntentRegistry`: 注册/获取意图
   - `PLATFORM_INTENTS`: 平台预定义意图列表
 
@@ -661,16 +694,18 @@ def test_intent_definition_with_slots():
 
 
 def test_nlu_result_serialization():
-    """验证 NLUResult 序列化"""
+    """验证 NLUResult 序列化（增量式）"""
     result = NLUResult(
-        intent="order_query",
+        action="new",
+        target_intent="order_query",
         confidence=0.95,
-        slots={"order_id": "123"},
-        missing_slots=[],
+        slots_update={"order_id": "123"},
     )
     d = result.model_dump()
-    assert d["intent"] == "order_query"
+    assert d["action"] == "new"
+    assert d["target_intent"] == "order_query"
     assert d["confidence"] == 0.95
+    assert d["slots_update"] == {"order_id": "123"}
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -683,7 +718,9 @@ uv run pytest tests/test_nlu/test_models.py -v
 
 ```python
 """NLU 层核心数据模型"""
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SlotDef(BaseModel):
@@ -695,18 +732,36 @@ class SlotDef(BaseModel):
 
 class IntentDefinition(BaseModel):
     """意图定义"""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     name: str = Field(..., description="意图唯一名称")
     description: str = Field(..., description="意图描述，用于 LLM 分类")
     required_slots: list[SlotDef] = Field(default_factory=list)
     optional_slots: list[SlotDef] = Field(default_factory=list)
+    handler: Any = Field(
+        default=None,
+        description="对应的 IntentHandler 子类；平台代码通过 get_handler() 获取",
+    )
 
 
 class NLUResult(BaseModel):
-    """NLU 层输出"""
-    intent: str = Field(..., description="识别的意图名")
-    confidence: float = Field(..., description="置信度 0-1")
-    slots: dict[str, object] = Field(default_factory=dict, description="已提取的槽位")
-    missing_slots: list[str] = Field(default_factory=list, description="缺失的必填槽位")
+    """NLU 层输出 — 增量式意图变化
+
+    只描述"本轮发生了什么变化"，不输出整个会话的意图状态。
+    """
+    action: str = Field(
+        default="continue",
+        description="变化类型：continue | switch | new | cancel | complete"
+    )
+    target_intent: str = Field(
+        default="",
+        description="目标意图名"
+    )
+    confidence: float = Field(default=0.0, description="置信度 0-1")
+    slots_update: dict[str, object] = Field(
+        default_factory=dict,
+        description="本次新增/更新的槽位（增量，仅对目标意图有效）"
+    )
 ```
 
 - [ ] **Step 4: 创建 app/nlu/platform_intents.py**
@@ -740,6 +795,7 @@ class IntentRegistry:
 
     _instance: "IntentRegistry | None" = None
     _business_intents: dict[str, list[IntentDefinition]] = {}
+    _handlers: dict[str, type] = {}  # intent_name → Handler 类
 
     def __new__(cls) -> "IntentRegistry":
         if cls._instance is None:
@@ -747,9 +803,14 @@ class IntentRegistry:
         return cls._instance
 
     @classmethod
-    def register_business(cls, business_name: str, intents: list[IntentDefinition]) -> None:
-        """注册一个业务线的意图"""
+    def register_business(
+        cls, business_name: str, intents: list[IntentDefinition],
+        handlers: dict[str, type] | None = None,
+    ) -> None:
+        """注册一个业务线的意图和处理器"""
         cls._business_intents[business_name] = intents
+        if handlers:
+            cls._handlers.update(handlers)
 
     @classmethod
     def get_all_intents(cls) -> list[IntentDefinition]:
@@ -768,6 +829,11 @@ class IntentRegistry:
         return None
 
     @classmethod
+    def get_handler(cls, intent_name: str) -> type | None:
+        """按意图名查找处理器类"""
+        return cls._handlers.get(intent_name)
+
+    @classmethod
     def get_required_slot_names(cls, intent_name: str) -> list[str]:
         """获取某个意图的所有必填槽位名称"""
         intent = cls.get_intent_by_name(intent_name)
@@ -779,6 +845,7 @@ class IntentRegistry:
     def clear(cls) -> None:
         """清空注册中心（用于测试）"""
         cls._business_intents = {}
+        cls._handlers = {}
 ```
 
 - [ ] **Step 6: 运行测试确认通过**
@@ -796,32 +863,36 @@ git commit -m "feat: 添加 NLU 层模型和意图注册中心"
 
 ---
 
-### Task 7: NLU 层 — 意图分类器
+### Task 7: NLU 层 — 意图分类器（多意图支持版）
 
 **Files:**
 - Create: `app/nlu/classifier.py`
 
 **Interfaces:**
 - Consumes: `IntentRegistry`, `ChatOpenAI` from `app.llm.client`
-- Produces: `IntentClassifier.classify(user_input, current_slots, active_intent) → NLUResult`
+- Produces: `IntentClassifier.classify(user_input, all_intents, session_intents, active_intent, messages) → NLUResult`
+  - `all_intents`: 所有可用意图定义（名称、描述、槽位），供 prompt 构造
+  - `session_intents`: 会话中已有的意图容器，含各意图的 status + slots
+  - 移除 `current_slots` 参数，槽位信息已包含在 `session_intents` 各意图的 `slots` 字段中
+  - 返回增量式 `NLUResult`（action + target_intent + slots_update）
 
 - [ ] **Step 1: 创建 app/nlu/classifier.py**
 
 ```python
-"""意图分类器 — 基于 LLM prompt 进行意图识别和槽位提取"""
+"""意图分类器 — 基于 LLM prompt 进行多意图增量识别和槽位提取"""
 import json
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from loguru import logger
 
-from app.nlu.models import NLUResult, IntentDefinition
+from app.nlu.models import NLUResult
 from app.nlu.registry import IntentRegistry
 from app.config import settings
 
 
 class IntentClassifier:
-    """LLM 驱动的意图分类器"""
+    """LLM 驱动的意图分类器（支持多意图挂起/恢复）"""
 
     def __init__(self, llm: ChatOpenAI | None = None):
         self._llm = llm
@@ -838,25 +909,51 @@ class IntentClassifier:
             )
         return self._llm
 
-    def _build_system_prompt(self) -> str:
-        """构造包含所有意图定义的系统 prompt"""
-        intents = self._registry.get_all_intents()
-        intent_descriptions = []
-        for intent in intents:
-            desc = f"- {intent.name}: {intent.description}"
-            if intent.required_slots:
-                slot_info = ", ".join(
-                    f"{s.name}({s.description})" for s in intent.required_slots
-                )
-                desc += f"。必填槽位: {slot_info}"
-            if intent.optional_slots:
-                slot_info = ", ".join(
-                    f"{s.name}({s.description})" for s in intent.optional_slots
-                )
-                desc += f"。可选槽位: {slot_info}"
-            intent_descriptions.append(desc)
+    def _build_system_prompt(
+        self,
+        all_intents: list[dict] | None = None,
+    ) -> str:
+        """构造包含所有可用意图定义的系统 prompt"""
+        # 从 all_intents 构建意图描述，或回退到注册中心
+        if all_intents:
+            intent_descriptions = []
+            for intent in all_intents:
+                desc = f"- {intent['name']}: {intent.get('description', '')}"
+                req_slots = intent.get("required_slots", [])
+                opt_slots = intent.get("optional_slots", [])
+                if req_slots:
+                    slot_info = ", ".join(
+                        f"{s['name']}({s.get('description', '')})"
+                        if isinstance(s, dict) else f"{s}"
+                        for s in req_slots
+                    )
+                    desc += f"。必填槽位: {slot_info}"
+                if opt_slots:
+                    slot_info = ", ".join(
+                        f"{s['name']}({s.get('description', '')})"
+                        if isinstance(s, dict) else f"{s}"
+                        for s in opt_slots
+                    )
+                    desc += f"。可选槽位: {slot_info}"
+                intent_descriptions.append(desc)
+        else:
+            intents = self._registry.get_all_intents()
+            intent_descriptions = []
+            for intent in intents:
+                desc = f"- {intent.name}: {intent.description}"
+                if intent.required_slots:
+                    slot_info = ", ".join(
+                        f"{s.name}({s.description})" for s in intent.required_slots
+                    )
+                    desc += f"。必填槽位: {slot_info}"
+                if intent.optional_slots:
+                    slot_info = ", ".join(
+                        f"{s.name}({s.description})" for s in intent.optional_slots
+                    )
+                    desc += f"。可选槽位: {slot_info}"
+                intent_descriptions.append(desc)
 
-        return f"""你是一个电商智能客服系统的意图识别模块。你的任务是分析用户输入，判断意图并提取槽位。
+        return f"""你是一个电商智能客服系统的意图识别模块。你的任务是分析用户输入，输出增量式意图变化。
 
 ## 可识别的意图
 
@@ -867,72 +964,106 @@ class IntentClassifier:
 请严格按以下 JSON 格式输出，不要输出其他内容：
 ```json
 {{
-    "intent": "意图名称",
+    "action": "continue|switch|new|cancel|complete",
+    "target_intent": "意图名称",
     "confidence": 0.95,
-    "slots": {{"槽位名": "槽位值"}},
-    "missing_slots": ["缺失的必填槽位名"]
+    "slots_update": {{"槽位名": "槽位值"}}
 }}
 ```
 
+## action 含义
+- continue: 用户在活跃意图上下文中继续填槽位
+- new: 用户表达了新意图（与当前活跃意图不同）
+- switch: 用户想切回会话中已有的被挂起意图
+- cancel: 用户想取消当前意图
+- complete: 当前意图已完成（通常由业务节点标记，NLU 较少使用）
+
 ## 规则
-1. 如果用户输入无法匹配任何已知意图，intent 设为 "unknown"
-2. 如果用户要求转人工，intent 设为 "transfer_human"
-3. 从用户输入中尽可能提取所有槽位值
-4. missing_slots 只列出必填槽位中缺失的部分
+1. 用户输入无法匹配任何已知意图 → target_intent="unknown", action="new"
+2. 用户要求转人工 → target_intent="transfer_human", action="new"
+3. 如果用户输入是单个值（如订单号），且当前有活跃意图的缺失槽位 → 识别为缺失槽位的填充值，action="continue"
+4. slots_update 只填本次提取到的值，不重复已填槽位
 5. confidence 取值 0-1，表示你对分类结果的把握程度"""
 
     def _build_user_prompt(
         self,
         user_input: str,
-        current_slots: dict[str, object] | None = None,
+        session_intents: dict | None = None,
         active_intent: str | None = None,
+        messages: list[dict[str, str]] | None = None,
     ) -> str:
-        """构造包含当前上下文的用户 prompt"""
-        context = []
+        """构造包含会话意图状态的用户 prompt"""
+        parts = []
+
+        # 对话历史
+        if messages:
+            history_lines = []
+            for m in messages[-10:]:  # 最近 10 轮
+                history_lines.append(f"[{m['role']}]: {m['content']}")
+            parts.append("对话历史:\n" + "\n".join(history_lines))
+
+        # 当前会话中的意图状态
+        if session_intents:
+            parts.append("\n会话中已有的意图:")
+            for name, ctx in session_intents.items():
+                if isinstance(ctx, dict):
+                    status = ctx.get("status", "active")
+                    slots = ctx.get("slots", {})
+                    required = ctx.get("required_slots", [])
+                    missing = [s for s in required if s not in slots]
+                    parts.append(
+                        f"- {name}（状态: {status}，已填槽位: {slots}，缺失槽位: {missing}）"
+                    )
+
         if active_intent:
-            context.append(f"当前活跃意图: {active_intent}")
-        if current_slots:
-            context.append(f"已收集的槽位: {json.dumps(current_slots, ensure_ascii=False)}")
-        context.append(f"用户输入: {user_input}")
-        return "\n".join(context)
+            parts.append(f"\n当前活跃意图: {active_intent}")
+
+        parts.append(f"\n用户输入: {user_input}")
+        return "\n".join(parts)
 
     async def classify(
         self,
         user_input: str,
-        current_slots: dict[str, object] | None = None,
+        all_intents: list[dict] | None = None,
+        session_intents: dict | None = None,
         active_intent: str | None = None,
+        messages: list[dict[str, str]] | None = None,
     ) -> NLUResult:
-        """分类用户输入，返回 NLUResult"""
-        system_prompt = self._build_system_prompt()
-        user_prompt = self._build_user_prompt(user_input, current_slots, active_intent)
+        """分类用户输入，返回增量式 NLUResult"""
+        system_prompt = self._build_system_prompt(all_intents)
+        user_prompt = self._build_user_prompt(
+            user_input, session_intents, active_intent, messages
+        )
 
-        messages = [
+        msgs = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
 
         try:
-            response = await self.llm.ainvoke(messages)
+            response = await self.llm.ainvoke(msgs)
             content = response.content.strip()
             # 去掉可能的 markdown code block 包裹
             if content.startswith("```"):
-                content = content.split("\n", 1)
-            if content.startswith("```"):
-                content = content[3:]
+                lines = content.split("\n")
+                content = "\n".join(lines[1:]) if len(lines) > 1 else content
             if content.endswith("```"):
                 content = content[:-3]
             content = content.strip()
             data = json.loads(content)
             result = NLUResult(**data)
             logger.info(
-                f"意图分类: intent={result.intent}, confidence={result.confidence}, "
-                f"slots={result.slots}, missing={result.missing_slots}"
+                f"意图分类: action={result.action}, target={result.target_intent}, "
+                f"confidence={result.confidence}, slots_update={result.slots_update}"
             )
             return result
         except Exception as e:
             logger.error(f"意图分类失败: {e}")
             # 降级返回 unknown
-            return NLUResult(intent="unknown", confidence=0.0, slots={}, missing_slots=[])
+            return NLUResult(
+                action="new", target_intent="unknown",
+                confidence=0.0, slots_update={},
+            )
 ```
 
 - [ ] **Step 2: Commit**
@@ -995,7 +1126,7 @@ git commit -m "feat: 添加 LLM 客户端封装"
 **Interfaces:**
 - Produces:
   - `BusinessContext(session_id, user_id, intent, slots)`
-  - `BusinessResult(success, data, error_message)` + 三个工厂方法
+  - `BusinessResult(success, data, error_message)` + message/action 属性 + 三个工厂方法
   - `OptionItem(label, value, disabled=False)` — 统一选项条目
   - `IntentHandler.handle(ctx) → BusinessResult` (抽象类)
 
@@ -1021,7 +1152,15 @@ git commit -m "feat: 添加 LLM 客户端封装"
 ```python
 """业务层基础抽象"""
 from abc import ABC, abstractmethod
+from typing import Any
 from pydantic import BaseModel, Field
+
+
+class OptionItem(BaseModel):
+    """统一选项条目 — ask_slot 时使用，前端据此渲染按钮列表"""
+    label: str = Field(..., description="展示文字")
+    value: str = Field(..., description="回传的槽位值")
+    disabled: bool = Field(default=False, description="是否置灰")
 
 
 class BusinessContext(BaseModel):
@@ -1037,6 +1176,49 @@ class BusinessResult(BaseModel):
     success: bool = Field(..., description="是否执行成功")
     data: object = Field(default=None, description="业务数据，传给 NLG 模板渲染")
     error_message: str = Field(default="", description="错误描述")
+
+    @property
+    def message(self) -> str:
+        """快捷获取回复消息文本"""
+        if self.data and isinstance(self.data, dict):
+            return str(self.data.get("message", ""))
+        return ""
+
+    @property
+    def action(self) -> str:
+        """快捷获取 action 类型（ask_slot / completed / error）"""
+        if self.data and isinstance(self.data, dict):
+            return str(self.data.get("action", ""))
+        return ""
+
+    @classmethod
+    def ask_slot(
+        cls,
+        slot_to_fill: str,
+        options: list[OptionItem],
+        message: str = "",
+    ) -> "BusinessResult":
+        """需要用户选择一个槽位值"""
+        return cls(
+            success=True,
+            data={
+                "action": "ask_slot",
+                "message": message,
+                "slot_to_fill": slot_to_fill,
+                "options": [o.model_dump() for o in options],
+            },
+        )
+
+    @classmethod
+    def completed(cls, message: str = "", **extra) -> "BusinessResult":
+        """业务处理完成，extra 合并到 data"""
+        data = {"action": "completed", "message": message, **extra}
+        return cls(success=True, data=data)
+
+    @classmethod
+    def error(cls, message: str = "") -> "BusinessResult":
+        """业务处理失败"""
+        return cls(success=False, error_message=message)
 
 
 class IntentHandler(ABC):
@@ -1751,19 +1933,20 @@ git commit -m "feat: 添加 NLG 层模板引擎和 LLM 生成器"
 
 ---
 
-### Task 13: DM 层 — 状态定义与图构建
+### Task 13: DM 层 — 状态定义与图构建（多意图支持版）
 
-**设计说明：** 槽位填充由业务 Handler 通过 `BusinessResult.ask_slot()` 处理（Handler 内部检查槽位，缺失时返回选项列表），DM 图无需独立的 `slot_filling` 节点。简化后的节点流程：
+**设计说明：** 槽位填充由业务 Handler 通过 `BusinessResult.ask_slot()` 处理（Handler 内部检查槽位，缺失时返回选项列表），DM 图无需独立的 `slot_filling` 节点。多意图支持通过新增的 `IntentController` 类管理意图生命周期，图结构保持不变。简化后的节点流程：
 
 ```
 entry → nlu → [条件路由]
-  ├─ 平台意图 (unknown/transfer_human) → fallback → response
+  ├─ 平台意图 / 无活跃意图 → fallback → response
   └─ 业务意图 → business → response
 ```
 
 **Files:**
 - Create: `app/dm/__init__.py`
 - Create: `app/dm/state.py`
+- Create: `app/dm/intent_controller.py`  ← **新增**
 - Create: `app/dm/router.py`
 - Create: `app/dm/nodes/__init__.py`
 - Create: `app/dm/nodes/nlu_node.py`
@@ -1779,16 +1962,18 @@ entry → nlu → [条件路由]
 - [ ] **Step 1: 创建 app/dm/state.py**
 
 ```python
-"""DM 层 DialogState 定义"""
+"""DM 层 DialogState 定义 — 多意图支持版"""
 from typing import Any, TypedDict
 
 
 class IntentContext(TypedDict):
-    """意图上下文"""
-    name: str
-    confidence: float
-    required_slots: list[str]
-    optional_slots: list[str]
+    """意图上下文 — 会话中产生的每个意图的完整状态"""
+    name: str                       # 意图名，如 "order_query"
+    confidence: float               # 识别置信度 0-1
+    status: str                     # "active" | "suspended" | "completed" | "cancelled"
+    slots: dict[str, object]        # 该意图独立槽位（不再共享全局 slots）
+    required_slots: list[str]       # 必填槽位名列表
+    optional_slots: list[str]       # 可选槽位名列表
 
 
 class DialogState(TypedDict):
@@ -1796,39 +1981,261 @@ class DialogState(TypedDict):
     session_id: str
     user_id: str
     user_input: str
-    intents: dict[str, IntentContext]
-    active_intent: str
-    slots: dict[str, object]
-    missing_slots: list[str]
-    business_result: object      # BusinessResult | None，由业务节点产出
+    messages: list[dict[str, str]]         # 对话历史
+    all_intents: list[dict]                # 新增：系统+业务线全部意图定义
+    intents: dict[str, IntentContext]      # 扩展：含 status + 独立 slots
+    active_intent: str                     # 当前活跃意图名（冗余方便路由/节点使用）
+    business_result: object                # BusinessResult | None
     final_response: str
     should_fallback: bool
+    # 移除: slots, missing_slots（槽位跟随意图管理）
 ```
 
-> **注意**：`missing_slots` 仍由 NLU 节点产出，供业务 Handler 的 `BusinessContext` 使用；回复统一通过 `business_result.message` 返回，不需要单独的 `pending_ask` 字段。
+> **注意**：`slots` 和 `missing_slots` 全局字段已移除。`all_intents` 从 `IntentRegistry` 构建，供 NLU prompt 构造使用。`messages` 对话历史由 API 层从 DB 加载后注入。
 
-- [ ] **Step 2: 创建 app/dm/router.py**
+- [ ] **Step 2: 创建 app/dm/intent_controller.py**
 
 ```python
-"""DM 层条件路由"""
+"""意图生命周期管理器 — 纯逻辑类，不持有状态"""
+from loguru import logger
+
+
+class IntentController:
+    """意图生命周期管理器 — 所有操作基于传入的 state 返回更新字典"""
+
+    # ── 核心决策 ──────────────────────────────
+    @staticmethod
+    def decide(state: dict, nlu_result) -> dict:
+        """根据 NLU 增量式输出更新意图容器和 active_intent
+
+        返回可合并到 state 的更新字典。
+        """
+        action = nlu_result.action
+        target = nlu_result.target_intent
+        intents = dict(state.get("intents", {}))
+        active_intent = state.get("active_intent", "")
+
+        if action == "continue":
+            # 合并槽位到目标意图（增量）
+            if target and target in intents:
+                intents[target]["slots"] = {
+                    **intents[target].get("slots", {}),
+                    **nlu_result.slots_update,
+                }
+            elif target:
+                # 防御：目标意图不在容器中，降级为 new
+                action = "new"
+
+        if action == "new":
+            # 同名去重检查
+            if target in intents:
+                old_status = intents[target].get("status", "")
+                if old_status in ("completed", "cancelled"):
+                    # 覆盖创建新意图
+                    pass
+                else:
+                    # 降级为 switch
+                    action = "switch"
+
+        if action == "new":
+            # 挂起当前活跃意图
+            for name, ctx in intents.items():
+                if ctx.get("status") == "active":
+                    ctx["status"] = "suspended"
+            # 创建新意图
+            all_intents = state.get("all_intents", [])
+            intent_def = next(
+                (i for i in all_intents if i.get("name") == target), {}
+            ) if isinstance(all_intents, list) else {}
+            required = [
+                s["name"] if isinstance(s, dict) else s
+                for s in intent_def.get("required_slots", [])
+            ]
+            optional = [
+                s["name"] if isinstance(s, dict) else s
+                for s in intent_def.get("optional_slots", [])
+            ]
+            intents[target] = {
+                "name": target,
+                "confidence": nlu_result.confidence,
+                "status": "active",
+                "slots": dict(nlu_result.slots_update),
+                "required_slots": required,
+                "optional_slots": optional,
+            }
+            active_intent = target
+
+        elif action == "switch":
+            # 挂起当前活跃意图
+            for name, ctx in intents.items():
+                if ctx.get("status") == "active":
+                    ctx["status"] = "suspended"
+            # 激活目标意图
+            if target in intents:
+                intents[target]["status"] = "active"
+                # 合并本轮槽位
+                if nlu_result.slots_update:
+                    intents[target]["slots"] = {
+                        **intents[target].get("slots", {}),
+                        **nlu_result.slots_update,
+                    }
+                active_intent = target
+
+        elif action == "cancel":
+            if target in intents:
+                intents[target]["status"] = "cancelled"
+            active_intent = IntentController._restore_suspended(intents)
+
+        elif action == "complete":
+            if target in intents:
+                intents[target]["status"] = "completed"
+            active_intent = IntentController._restore_suspended(intents)
+
+        logger.info(
+            f"IntentController: action={action}, target={target}, "
+            f"active_intent={active_intent}, intents={list(intents.keys())}"
+        )
+        return {"intents": intents, "active_intent": active_intent}
+
+    # ── 查询 ──────────────────────────────────
+    @staticmethod
+    def get_active_context(state: dict):
+        """从活跃意图构建业务节点所需的 BusinessContext"""
+        from app.business.base import BusinessContext
+        active = state.get("active_intent", "")
+        intents = state.get("intents", {})
+        ctx = intents.get(active, {}) if active else {}
+        return BusinessContext(
+            session_id=state.get("session_id", ""),
+            user_id=state.get("user_id", ""),
+            intent=active,
+            slots=ctx.get("slots", {}),
+        )
+
+    @staticmethod
+    def get_active_slots(state: dict) -> dict[str, object]:
+        """快捷：获取当前活跃意图的槽位"""
+        active = state.get("active_intent", "")
+        intents = state.get("intents", {})
+        return intents.get(active, {}).get("slots", {})
+
+    @staticmethod
+    def get_missing_slots(state: dict) -> list[str]:
+        """动态计算：活跃意图 required_slots - 已填 slots"""
+        active = state.get("active_intent", "")
+        intents = state.get("intents", {})
+        ctx = intents.get(active, {})
+        required = ctx.get("required_slots", [])
+        filled = ctx.get("slots", {}).keys()
+        return [s for s in required if s not in filled]
+
+    @staticmethod
+    def find_active(intents: dict) -> str:
+        """从意图容器中找到 status="active" 的意图名，无则返回 "" """
+        for name, ctx in intents.items():
+            if isinstance(ctx, dict) and ctx.get("status") == "active":
+                return name
+        return ""
+
+    # ── 序列化 ────────────────────────────────
+    @staticmethod
+    def to_snapshot(intents: dict) -> dict:
+        """将意图容器序列化为纯 dict，用于 Session.intents_json 持久化
+
+        completed 和 cancelled 的意图不保存（从容器中移除）。
+        """
+        result = {}
+        for name, ctx in intents.items():
+            if isinstance(ctx, dict):
+                status = ctx.get("status", "")
+                if status in ("completed", "cancelled"):
+                    continue
+                result[name] = {
+                    "name": ctx.get("name", name),
+                    "confidence": ctx.get("confidence", 0.0),
+                    "status": status,
+                    "slots": ctx.get("slots", {}),
+                    "required_slots": ctx.get("required_slots", []),
+                    "optional_slots": ctx.get("optional_slots", []),
+                }
+        return result
+
+    @staticmethod
+    def from_snapshot(data: dict) -> dict:
+        """从 DB 快照恢复意图容器"""
+        result = {}
+        for name, ctx in data.items():
+            if isinstance(ctx, dict):
+                result[name] = {
+                    "name": ctx.get("name", name),
+                    "confidence": ctx.get("confidence", 0.0),
+                    "status": ctx.get("status", "suspended"),
+                    "slots": ctx.get("slots", {}),
+                    "required_slots": ctx.get("required_slots", []),
+                    "optional_slots": ctx.get("optional_slots", []),
+                }
+        return result
+
+    @staticmethod
+    def build_all_intents() -> list[dict]:
+        """从 IntentRegistry 构建 all_intents 列表"""
+        from app.nlu.registry import IntentRegistry
+        registry = IntentRegistry()
+        intents = registry.get_all_intents()
+        result = []
+        for intent in intents:
+            result.append({
+                "name": intent.name,
+                "description": intent.description,
+                "required_slots": [
+                    {"name": s.name, "description": s.description}
+                    for s in intent.required_slots
+                ],
+                "optional_slots": [
+                    {"name": s.name, "description": s.description}
+                    for s in intent.optional_slots
+                ],
+            })
+        return result
+
+    # ── 内部辅助 ──────────────────────────────
+    @staticmethod
+    def _restore_suspended(intents: dict) -> str:
+        """按 LIFO 顺序恢复最近被挂起的意图，返回恢复后的 active_intent 名"""
+        # intents 的插入顺序即时间顺序，反转找到最后一个 suspended
+        for name in reversed(list(intents.keys())):
+            ctx = intents.get(name, {})
+            if isinstance(ctx, dict) and ctx.get("status") == "suspended":
+                ctx["status"] = "active"
+                logger.info(f"自动恢复挂起意图: {name}")
+                return name
+        return ""
+```
+
+- [ ] **Step 3: 创建 app/dm/router.py**
+
+```python
+"""DM 层条件路由 — 多意图支持版"""
 
 
 def is_platform_intent(state: dict) -> bool:
-    """判断当前活跃意图是否为平台意图"""
+    """判断当前活跃意图是否为平台意图（或无活跃意图时也走 fallback）"""
     active = state.get("active_intent", "")
+    # 无活跃意图时也走 fallback
+    if not active:
+        return True
     return active in ("unknown", "transfer_human")
 ```
 
-> **注意**：`are_slots_filled` 不再需要——槽位检查由业务 Handler 内部完成，DM 图只做平台/业务意图的二选一路由。
-
-- [ ] **Step 3: 创建 DM 各节点**
+- [ ] **Step 4: 创建 DM 各节点**
 
 `app/dm/nodes/nlu_node.py`:
 ```python
-"""NLU 节点 — 调用意图分类器"""
+"""NLU 节点 — 调用意图分类器，委托 Controller 管理意图生命周期"""
 from loguru import logger
 
 from app.nlu.classifier import IntentClassifier
+from app.dm.intent_controller import IntentController
 
 _classifier: IntentClassifier | None = None
 
@@ -1841,42 +2248,44 @@ def get_classifier() -> IntentClassifier:
 
 
 async def nlu_node(state: dict) -> dict:
-    """NLU 节点：对用户输入进行意图识别和槽位提取"""
+    """NLU 节点：对用户输入进行增量式意图识别，委托 Controller 更新状态"""
     user_input = state.get("user_input", "")
-    current_slots = state.get("slots", {})
-    active_intent = state.get("active_intent", "")
 
     classifier = get_classifier()
     result = await classifier.classify(
         user_input=user_input,
-        current_slots=current_slots,
-        active_intent=active_intent,
+        all_intents=state.get("all_intents", []),
+        session_intents=state.get("intents", {}),
+        active_intent=state.get("active_intent", ""),
+        messages=state.get("messages", []),
     )
 
-    logger.info(f"NLU 节点输出: intent={result.intent}, confidence={result.confidence}")
+    # 委托 Controller 处理意图生命周期
+    update = IntentController.decide(state, result)
 
-    return {
-        "active_intent": result.intent,
-        "slots": {**current_slots, **result.slots},
-        "missing_slots": result.missing_slots,
-        "should_fallback": result.intent in ("unknown", "transfer_human"),
-    }
+    logger.info(
+        f"NLU 节点输出: action={result.action}, "
+        f"target={result.target_intent}, "
+        f"confidence={result.confidence}, "
+        f"slots_update={result.slots_update}"
+    )
+
+    # 判断是否兜底
+    update["should_fallback"] = (
+        result.target_intent in ("unknown", "transfer_human")
+    )
+
+    return update
 ```
 
 `app/dm/nodes/business_node.py`:
 ```python
-"""业务节点 — 调用业务线的意图处理器"""
+"""业务节点 — 通过 IntentRegistry 获取处理器，Controller 构建上下文"""
 from loguru import logger
 
-from app.business.base import BusinessContext, BusinessResult
-from app.business.ecommerce.handlers.order_query import OrderQueryHandler
-from app.business.ecommerce.handlers.postsale_return import PostsaleReturnHandler
-
-# 意图 → 处理器映射
-_handler_map = {
-    "order_query": OrderQueryHandler,
-    "postsale_return": PostsaleReturnHandler,
-}
+from app.business.base import BusinessResult
+from app.nlu.registry import IntentRegistry
+from app.dm.intent_controller import IntentController
 
 
 async def business_node(state: dict) -> dict:
@@ -1889,22 +2298,26 @@ async def business_node(state: dict) -> dict:
     """
     active_intent = state.get("active_intent", "")
 
-    handler_cls = _handler_map.get(active_intent)
+    handler_cls = IntentRegistry.get_handler(active_intent)
     if handler_cls is None:
         logger.warning(f"未找到意图处理器: {active_intent}")
-        return {
-            "business_result": BusinessResult.error("该功能暂未开放"),
-        }
+        return {"business_result": BusinessResult.error("该功能暂未开放")}
 
-    ctx = BusinessContext(
-        session_id=state.get("session_id", ""),
-        user_id=state.get("user_id", ""),
-        intent=active_intent,
-        slots=state.get("slots", {}),
-    )
+    # 通过 Controller 构建上下文，包含该意图的独立槽位
+    ctx = IntentController.get_active_context(state)
 
     handler = handler_cls()
     result = await handler.handle(ctx)
+
+    # 业务完成时标记意图为 completed，Controller 自动恢复挂起意图
+    if result.success and isinstance(result.data, dict):
+        if result.data.get("action") == "completed":
+            from app.nlu.models import NLUResult
+            intent_update = IntentController.decide(
+                state,
+                NLUResult(action="complete", target_intent=active_intent),
+            )
+            return {**intent_update, "business_result": result}
 
     logger.info(f"业务节点执行: intent={active_intent}, action={result.action}")
     return {"business_result": result}
@@ -1965,10 +2378,10 @@ async def response_node(state: dict) -> dict:
     return {"final_response": response_text}
 ```
 
-- [ ] **Step 4: 创建 app/dm/graph.py**
+- [ ] **Step 5: 创建 app/dm/graph.py**
 
 ```python
-"""LangGraph 对话图构建"""
+"""LangGraph 对话图构建 — 多意图支持版（图结构不变）"""
 from langgraph.graph import StateGraph, END
 
 from app.dm.state import DialogState
@@ -1982,8 +2395,8 @@ from app.dm.nodes.fallback_node import fallback_node
 def build_dialog_graph() -> StateGraph:
     """构建对话状态图
 
-    节点流程：
-    entry → nlu → [平台意图 → fallback | 业务意图 → business] → response → END
+    节点流程（图结构不变，多意图由 IntentController 内部管理）：
+    entry → nlu → [平台意图/无活跃意图 → fallback | 业务意图 → business] → response → END
     """
     workflow = StateGraph(DialogState)
 
@@ -1996,7 +2409,7 @@ def build_dialog_graph() -> StateGraph:
     # 设置入口
     workflow.set_entry_point("nlu")
 
-    # NLU 后的条件路由：平台意图走 fallback，业务意图走 business
+    # NLU 后的条件路由：平台意图或无活跃意图走 fallback，业务意图走 business
     workflow.add_conditional_edges(
         "nlu",
         lambda state: "fallback" if is_platform_intent(state) else "business",
@@ -2014,11 +2427,11 @@ def build_dialog_graph() -> StateGraph:
     return workflow.compile()
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add app/dm/
-git commit -m "feat: 添加 DM 层 LangGraph 对话状态机"
+git commit -m "feat: 添加 DM 层多意图支持 LangGraph 对话状态机"
 ```
 
 ---
@@ -2032,12 +2445,12 @@ git commit -m "feat: 添加 DM 层 LangGraph 对话状态机"
 - Create: `app/api/v1/chat.py`
 
 **Interfaces:**
-- Consumes: `SessionService`, `MessageService`, `build_dialog_graph()`, `get_db()`
+- Consumes: `SessionService`, `MessageService`, `IntentController`, `build_dialog_graph()`, `get_db()`
 - Produces:
   - `POST /api/v1/sessions` — 创建会话
   - `GET /api/v1/sessions` — 会话列表
   - `GET /api/v1/sessions/{session_id}` — 会话详情+消息
-  - `POST /api/v1/sessions/{session_id}/messages` — 发送消息（SSE 流式返回）
+  - `POST /api/v1/sessions/{session_id}/messages` — 发送消息（SSE 流式返回），含意图状态持久化
 
 - [ ] **Step 1: 创建 app/api/v1/chat.py**
 
@@ -2057,6 +2470,7 @@ from app.core.exceptions import NotFoundException, ValidationException
 from app.core.response import success_response, error_response
 from app.session.service import SessionService, MessageService
 from app.dm.graph import build_dialog_graph
+from app.dm.intent_controller import IntentController
 
 router = APIRouter(prefix="/sessions", tags=["会话管理"])
 
@@ -2144,7 +2558,7 @@ async def send_message(
     content: str = Query(..., description="消息内容"),
     db: AsyncSession = Depends(get_db),
 ):
-    """发送消息，SSE 流式返回 AI 回复"""
+    """发送消息，SSE 流式返回 AI 回复，含多意图状态持久化"""
     # 验证会话存在
     session = await SessionService.get_session(db, session_id)
     if session is None:
@@ -2152,6 +2566,17 @@ async def send_message(
 
     # 保存用户消息
     await MessageService.add_message(db, session_id, "user", content)
+
+    # 从 DB 恢复意图状态
+    saved_intents = await SessionService.load_intents_snapshot(db, session_id)
+    initial_intents = saved_intents if saved_intents else {}
+
+    # 加载对话历史
+    messages = await MessageService.list_messages(db, session_id)
+    message_dicts = [
+        {"role": m.role, "content": m.content}
+        for m in messages
+    ]
 
     # 构建对话图
     graph = build_dialog_graph()
@@ -2161,22 +2586,28 @@ async def send_message(
         "session_id": session_id,
         "user_id": session.user_id,
         "user_input": content,
-        "intents": {},
-        "active_intent": "",
-        "slots": {},
-        "missing_slots": [],
+        "messages": message_dicts,  # 新增：对话历史
+        "all_intents": IntentController.build_all_intents(),  # 新增
+        "intents": initial_intents,  # 从 DB 恢复
+        "active_intent": IntentController.find_active(initial_intents),  # 由 Controller 确定
         "business_result": None,
         "final_response": "",
         "should_fallback": False,
+        # 移除: "slots", "missing_slots"
     }
 
     # 执行对话图
     final_state = await graph.ainvoke(initial_state)
     reply = final_state.get("final_response", "抱歉，我不知道该如何回答。")
 
+    # 持久化意图状态
+    await SessionService.save_intents_snapshot(
+        db, session_id, final_state.get("intents", {})
+    )
+
     # 保存 AI 回复
     active_intent = final_state.get("active_intent", "")
-    slots = final_state.get("slots", {})
+    slots = IntentController.get_active_slots(final_state)
     await MessageService.add_message(
         db, session_id, "assistant", reply,
         intent=active_intent if active_intent else None,
@@ -2229,7 +2660,10 @@ git commit -m "feat: 添加 REST API 端点和 SSE 流式回复"
 
 ```python
 """FastAPI 应用入口"""
+import importlib
+import pkgutil
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -2239,16 +2673,62 @@ from app.api.v1.router import api_router
 from app.core.exceptions import AppException
 from app.core.response import error_response
 from app.nlu.registry import IntentRegistry
-from app.business.ecommerce.intents import ECOMMERCE_INTENTS
+
+
+def _discover_business_lines() -> None:
+    """自动发现并注册 business/ 下所有业务线
+
+    遍历 app/business/ 目录下的所有子包，导入其 intents 模块，
+    读取 INTENTS 属性（list[IntentDefinition]），注册到 IntentRegistry。
+
+    约定：
+    - 每个业务线是 app/business/ 下的一个子包
+    - 子包内必须有 intents.py 模块
+    - intents.py 必须导出 INTENTS: list[IntentDefinition]
+    - 每个 IntentDefinition.handler 绑定对应的处理器类（None 表示暂未实现）
+    """
+    import app.business as business_pkg
+
+    business_dir = Path(business_pkg.__path__[0])
+    for entry in business_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        if entry.name.startswith("_") or entry.name.startswith("__"):
+            continue
+
+        pkg_name = entry.name
+        try:
+            intents_module = importlib.import_module(
+                f"app.business.{pkg_name}.intents"
+            )
+        except ImportError as e:
+            logger.warning(
+                f"跳过业务线 '{pkg_name}'：无法导入 intents 模块 ({e})"
+            )
+            continue
+
+        if not hasattr(intents_module, "INTENTS"):
+            logger.warning(
+                f"跳过业务线 '{pkg_name}'：intents 模块未导出 INTENTS 属性"
+            )
+            continue
+
+        intents = intents_module.INTENTS
+        IntentRegistry.register_business(pkg_name, intents)
+        logger.info(
+            f"已注册业务线 '{pkg_name}'，意图: "
+            f"{[i.name for i in intents]}"
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    # 启动时：注册业务线意图
-    IntentRegistry.register_business("ecommerce", ECOMMERCE_INTENTS)
-    logger.info("电商业务线意图已注册")
-    logger.info(f"已注册意图: {[i.name for i in IntentRegistry.get_all_intents()]}")
+    # 启动时：自动发现并注册所有业务线意图
+    _discover_business_lines()
+    logger.info(
+        f"全部已注册意图: {[i.name for i in IntentRegistry.get_all_intents()]}"
+    )
     yield
     # 关闭时清理
     logger.info("应用关闭")

@@ -11,6 +11,17 @@ class EcommerceSettings(BaseSettings):
 
     eco_database_url: str = "mysql+asyncmy://root:123321@localhost:3307/ecs"
 
+    # Neo4j 知识图谱连接配置
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "neo4j123456"
+
+    # 嵌入模型配置（用于 Neo4j 向量检索，DashScope 兼容 OpenAI 接口）
+    dashscope_api_key: str = "sk-ws-H.EMHEEXI.uJ5R.MEYCIQCYxfMDepPusDD6nI99nxoc8m0-6qYcYknvB1ydDc9RpAIhALS0D9kt0wkKVDsZRVViOauO7e7-OU8HzBDHzNBaqCtn"  # 阿里云百炼 API Key
+    embedding_model: str = "text-embedding-v4"
+    embedding_dimensions: int = 1024
+    embedding_api_base_url: str = "https://llm-fxrkx8nfqvsdmqj8.cn-beijing.maas.aliyuncs.com/api/v1"
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

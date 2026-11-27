@@ -4,6 +4,7 @@ from app.business.ecommerce.intents import INTENTS
 from app.nlu.models import IntentDefinition, SlotDef
 from app.business.ecommerce.handlers.order_query import OrderQueryHandler
 from app.business.ecommerce.handlers.postsale_return import PostsaleReturnHandler
+from app.business.ecommerce.handlers.product_inquiry import ProductInquiryHandler
 
 
 class TestEcommerceIntents:
@@ -51,10 +52,10 @@ class TestIntentHandlerBinding:
         intent = next(i for i in INTENTS if i.name == "postsale_return")
         assert intent.handler is PostsaleReturnHandler
 
-    def test_product_inquiry_handler_is_none(self):
-        """验证 product_inquiry handler 为 None（暂未实现）"""
+    def test_product_inquiry_handler_bound(self):
+        """验证 product_inquiry handler 已绑定 ProductInquiryHandler"""
         intent = next(i for i in INTENTS if i.name == "product_inquiry")
-        assert intent.handler is None
+        assert intent.handler is ProductInquiryHandler
 
 
 class TestOrderQueryIntent:
@@ -154,4 +155,4 @@ class TestEcommerceIntentRegistration:
         assert handler2 is PostsaleReturnHandler
 
         handler3 = IntentRegistry.get_handler("product_inquiry")
-        assert handler3 is None
+        assert handler3 is ProductInquiryHandler

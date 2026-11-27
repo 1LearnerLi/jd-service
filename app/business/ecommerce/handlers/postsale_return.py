@@ -14,6 +14,7 @@ from app.business.base import (
     BusinessResult,
     OptionItem,
 )
+from app.business.ecommerce.models.order import OrderInfo
 
 # 可售后的订单状态
 _REFUNDABLE_STATUSES = frozenset({"已付款", "已发货", "已签收"})
@@ -24,6 +25,9 @@ _POSTSALE_TYPES = {
     "return_refund": "退货退款",
 }
 
+# 售后方式反向映射（中文 label → 内部 key），用于 NLU 翻译后的兜底规范化
+_LABEL_TO_TYPE: dict[str, str] = {v: k for k, v in _POSTSALE_TYPES.items()}
+
 # 售后原因
 _POSTSALE_REASONS = [
     "7天无理由",
@@ -33,6 +37,32 @@ _POSTSALE_REASONS = [
     "质量问题",
     "不喜欢/不想要了",
 ]
+
+
+def _build_order_label(o: OrderInfo) -> str:
+    """构造订单按钮的展示文案 — 时间 + 商品 + 状态"""
+    create_date = o.create_time.strftime("%m-%d %H:%M") if o.create_time else "未知"
+    product_names = ", ".join(d.sku_name for d in (o.details or [])[:2])
+    if len(o.details or []) > 2:
+        product_names += " 等"
+    if not product_names:
+        product_names = "未知商品"
+    return f"[{create_date}] {product_names}（{o.order_status}）"
+
+
+def _normalize_postsale_type(raw: str) -> str | None:
+    """将 postsale_type 规范化为内部 key
+
+    NLU 可能把内部 key（如 "return_refund"）"理解"成中文 label（"退货退款"），
+    因此需要反向映射兜底。已匹配的内部 key 直接返回。
+    """
+    # 已是合法内部 key，直接返回
+    if raw in _POSTSALE_TYPES:
+        return raw
+    # 可能是中文 label，做反向映射
+    if raw in _LABEL_TO_TYPE:
+        return _LABEL_TO_TYPE[raw]
+    return None
 
 
 class PostsaleReturnHandler(IntentHandler):
@@ -62,7 +92,7 @@ class PostsaleReturnHandler(IntentHandler):
             orders = await self._repo.get_orders_by_user(ctx.user_id, limit=5)
             options = [
                 OptionItem(
-                    label=f"{o.order_id}（{o.order_status}）",
+                    label=_build_order_label(o),
                     value=o.order_id,
                     disabled=o.order_status not in _REFUNDABLE_STATUSES,
                 )
@@ -123,8 +153,12 @@ class PostsaleReturnHandler(IntentHandler):
         postsale_type = str(ctx.slots.get("postsale_type", "refund_only"))
         postsale_reason = str(ctx.slots.get("postsale_reason", ""))
 
-        if postsale_type not in _POSTSALE_TYPES:
-            return BusinessResult.error(f"不支持的售后方式: {postsale_type}")
+        # 规范化 postsale_type：NLU 可能将内部 key 翻译为中文 label，做反向映射兜底
+        postsale_type = _normalize_postsale_type(postsale_type)
+        if postsale_type is None:
+            return BusinessResult.error(
+                f"不支持的售后方式: {ctx.slots.get('postsale_type', '')}"
+            )
 
         order_check = await self._check_order(ctx)
         if not order_check.success:

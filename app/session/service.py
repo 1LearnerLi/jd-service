@@ -97,6 +97,7 @@ class MessageService:
         content: str,
         intent: str | None = None,
         slots: dict | None = None,
+        business_data: dict | None = None,
     ) -> Message:
         """添加消息"""
         message = Message(
@@ -105,6 +106,7 @@ class MessageService:
             content=content,
             intent=intent,
             slots_json=slots,
+            business_data_json=business_data,
         )
         db.add(message)
         # 同时更新会话的 updated_at

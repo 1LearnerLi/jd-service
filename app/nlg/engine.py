@@ -39,9 +39,18 @@ class NLGEngine:
         """
         context = context or {}
 
-        # 有业务结果 → 直接使用已渲染好的 message（含 ask_slot / completed / error）
+        # 有业务结果 → 渲染 message + options（如有）
         if business_result is not None:
-            return business_result.message
+            msg = business_result.message
+            if isinstance(business_result.data, dict) and business_result.data.get("options"):
+                lines = [msg, ""]
+                for i, opt in enumerate(business_result.data["options"], 1):
+                    label = opt.get("label", opt.get("value", "?"))
+                    value = opt.get("value", "")
+                    disabled = " [不可选]" if opt.get("disabled") else ""
+                    lines.append(f"  {i}. {label}{disabled}  (回复: {value})")
+                return "\n".join(lines)
+            return msg
 
         # 转人工 → 固定文案
         if intent == "transfer_human":

@@ -3,6 +3,7 @@
 REST + SSE：创建/查询会话 + 发送消息（SSE 流式返回 AI 回复）。
 """
 import asyncio
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,6 +93,7 @@ async def get_session(
                     "content": m.content,
                     "intent": m.intent,
                     "slots_json": m.slots_json,
+                    "business_data": m.business_data_json,
                     "created_at": m.created_at.isoformat(),
                 }
                 for m in messages
@@ -155,33 +157,73 @@ async def send_message(
         final_state = await _dialog_graph.ainvoke(initial_state)
         reply = final_state.get("final_response", "抱歉，我不知道该如何回答。")
         active_intent = final_state.get("active_intent", "")
+        active_slots = IntentController.get_active_slots(final_state)
     except Exception:
         logger.exception("对话图执行失败")
         reply = "抱歉，服务暂时不可用，请稍后再试。"
         active_intent = ""
+        active_slots = {}
+        final_state = {}  # 防止后续用 final_state 时 UnboundLocalError
 
     # ── 8. 持久化意图状态 ────────────────────────────────
-    await SessionService.save_intents_snapshot(
-        db, session_id, final_state.get("intents", {})
-    )
+    try:
+        await SessionService.save_intents_snapshot(
+            db, session_id, final_state.get("intents", {})
+        )
+    except Exception:
+        logger.exception("意图状态持久化失败，跳过")
 
     # ── 9. 保存 AI 回复 ──────────────────────────────────
+    # 只存 BusinessResult.data（内层的 {action, message, options, ...}）
+    # 与 SSE done 事件中前端解包后的结构一致
+    business_result = final_state.get("business_result")
+    business_data_dict: dict | None = None
+    if (
+        business_result is not None
+        and hasattr(business_result, "data")
+        and isinstance(business_result.data, dict)
+    ):
+        business_data_dict = business_result.data
     await MessageService.add_message(
         db,
         session_id,
         "assistant",
         reply,
         intent=active_intent if active_intent else None,
-        slots=None,  # 槽位信息已在 intents_json 中持久化
+        slots=active_slots if active_slots else None,
+        business_data=business_data_dict,
     )
 
     # ── 10. SSE 流式返回 ─────────────────────────────────
     async def event_generator():
-        """逐块发送回复文本，模拟 LLM 流式输出效果"""
+        """逐块发送回复文本，模拟 LLM 流式输出效果
+
+        SSE 事件：
+        - message: 回复文本片段
+        - done: 回复完成，data 为 JSON，包含 intent/slots/business_data/message 全量文本
+        """
+        # 先发送文本片段
         for i in range(0, len(reply), _SSE_CHUNK_SIZE):
             chunk = reply[i:i + _SSE_CHUNK_SIZE]
             yield {"event": "message", "data": chunk}
             await asyncio.sleep(_SSE_CHUNK_DELAY)
-        yield {"event": "done", "data": ""}
+
+        # 构造 done 事件的元数据
+        # business_data 传内层 data（{action, message, options, ...}），与 DB 存储一致
+        business_result = final_state.get("business_result")
+        sse_business_data: dict | None = None
+        if (
+            business_result is not None
+            and hasattr(business_result, "data")
+            and isinstance(business_result.data, dict)
+        ):
+            sse_business_data = business_result.data
+        done_meta = {
+            "intent": active_intent if active_intent else None,
+            "slots_json": active_slots if active_slots else None,
+            "business_data": sse_business_data,
+            "message": reply,
+        }
+        yield {"event": "done", "data": json.dumps(done_meta, ensure_ascii=False)}
 
     return EventSourceResponse(event_generator())

@@ -52,6 +52,10 @@ class Message(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     intent: Mapped[str | None] = mapped_column(String(50), nullable=True)
     slots_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    business_data_json: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True,
+        comment="业务结构化数据快照: ask_slot/options 等，前端据此恢复按钮"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )

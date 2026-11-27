@@ -18,7 +18,7 @@ async def test_generate_with_business_result():
     )
     assert result == "订单查询成功"
 
-    # 测试 ask_slot 类型
+    # 测试 ask_slot 类型（含 options 渲染）
     result = await engine.generate(
         intent="postsale_return",
         business_result=BusinessResult.ask_slot(
@@ -27,7 +27,9 @@ async def test_generate_with_business_result():
             message="请选择要申请售后的订单",
         ),
     )
-    assert result == "请选择要申请售后的订单"
+    assert "请选择要申请售后的订单" in result
+    assert "ORD-001" in result
+    assert "(回复: ORD-001)" in result
 
     # 测试 error 类型
     result = await engine.generate(

@@ -24,6 +24,7 @@ uv.lock
 *~
 
 # Environment
+.env
 .env.local
 .env.*.local
 
@@ -43,6 +44,7 @@ Thumbs.db
 
 # Docker
 docker/data/
+docker/.env
 
 # Claude Code
 .claude/worktrees/

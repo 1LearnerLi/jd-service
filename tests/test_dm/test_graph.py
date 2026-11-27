@@ -186,12 +186,13 @@ class TestGraphIntegration:
 
         final_state = await graph.ainvoke(state)
 
-        assert final_state["active_intent"] == ""
+        assert final_state["active_intent"] == "order_query"
         assert final_state["business_result"] is not None
         assert final_state["should_fallback"] is False
         assert "ORD-001" in final_state["final_response"]
-        # 业务完成后意图状态为 completed
-        assert final_state["intents"]["order_query"]["status"] == "completed"
+        # 业务完成后意图保持 active，槽位被清空以便复用
+        assert final_state["intents"]["order_query"]["status"] == "active"
+        assert final_state["intents"]["order_query"]["slots"] == {}
 
     @pytest.mark.asyncio
     async def test_business_ask_slot_flow(self, monkeypatch):

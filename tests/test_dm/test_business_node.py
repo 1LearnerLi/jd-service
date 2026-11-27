@@ -26,8 +26,8 @@ class TestBusinessNode:
         IntentRegistry.register_business("test", [intent_def])
 
     @pytest.mark.asyncio
-    async def test_business_node_completed_updates_intent_status(self):
-        """验证业务完成后意图状态变为 completed"""
+    async def test_business_node_completed_keeps_intent_active(self):
+        """验证业务完成后意图保持 active，清空槽位"""
         mock_result = BusinessResult.completed(
             message="📋 订单 ORD-001 详情已加载",
         )
@@ -59,12 +59,16 @@ class TestBusinessNode:
         br = result["business_result"]
         assert br.success is True
         assert br.data["action"] == "completed"
-        # Controller 标记完成
-        assert result["intents"]["order_query"]["status"] == "completed"
+        # 意图保持 active，不清空状态
+        assert result["intents"]["order_query"]["status"] == "active"
+        # 槽位被清空以便后续复用
+        assert result["intents"]["order_query"]["slots"] == {}
+        # active_intent 保持不变
+        assert result["active_intent"] == "order_query"
 
     @pytest.mark.asyncio
-    async def test_business_node_completed_restores_suspended(self):
-        """验证业务完成后自动恢复挂起的意图"""
+    async def test_business_node_completed_keeps_suspended_intact(self):
+        """验证业务完成后不改变挂起意图状态"""
         mock_result = BusinessResult.completed(
             message="📋 订单 ORD-003 详情已加载",
         )
@@ -100,10 +104,12 @@ class TestBusinessNode:
 
         result = await business_node(state)
 
-        assert result["intents"]["order_query"]["status"] == "completed"
-        # 挂起的售后意图被恢复
-        assert result["intents"]["postsale_return"]["status"] == "active"
-        assert result["active_intent"] == "postsale_return"
+        # 活跃意图保持 active，槽位被清空
+        assert result["intents"]["order_query"]["status"] == "active"
+        assert result["intents"]["order_query"]["slots"] == {}
+        # 挂起的意图保持 suspended（不再自动恢复，由 NLU switch 处理）
+        assert result["intents"]["postsale_return"]["status"] == "suspended"
+        assert result["active_intent"] == "order_query"
 
     @pytest.mark.asyncio
     async def test_business_node_ask_slot(self):

@@ -1,22 +1,23 @@
 # Workflow 名称，会显示在 GitHub Actions 页面中。
-name: Claude PR Review
+name: Claude PR Review & Auto PR
 
 # 触发条件：
-# 1. 当有人创建、更新或重新打开目标为 dev/main 的 PR 时，自动运行代码审查。
-# 2. 当有人在目标为 dev/main 的 PR 评论中输入 @claude 时，允许手动重新触发审查。
+# 1. 当有人创建、更新或重新打开 PR 时，自动运行代码审查（不限目标分支）。
+# 2. 当有人在 PR 评论中输入 @claude 时，允许手动重新触发审查。
+# 3. 当 dev 分支有新的推送时，自动检查是否需要创建 dev→main 的 PR。
 on:
   pull_request:
     # opened: 新建 PR
     # synchronize: PR 源分支有新提交
     # reopened: 重新打开已关闭的 PR
     types: [opened, synchronize, reopened]
-    branches:
-      - dev
-      - main
   issue_comment:
     # GitHub 的 PR 评论也属于 issue_comment 事件。
     # 后面的 job.if 会进一步判断评论是否来自 PR，以及是否包含 @claude。
     types: [created]
+  push:
+    # dev 分支有新提交时，检查是否需要自动创建 dev→main 的 PR
+    branches: [dev]
 
 # 并发控制：
 # 同一个 PR 的旧审查任务如果还在运行，新任务会取消旧任务。
@@ -39,26 +40,15 @@ jobs:
     # 使用 GitHub 托管的 Ubuntu runner。
     runs-on: ubuntu-latest
 
-    # 环境变量：
-    # ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION 允许仍在 Node 20 上运行的内置 action
-    # （如 actions/checkout）在 Node 24 为默认的 runner 上正常工作。
-    # GitHub 计划于 2026-09-16 彻底移除 Node 20，届时需改为原生 Node 24 兼容版本。
-    env:
-      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'
-
     # Job 运行条件：
-    # - pull_request 事件直接运行（base 分支限制已在 on.pull_request.branches 中过滤）。
-    # - issue_comment 事件只在”评论对象是 PR”、”评论包含 @claude”、且目标分支为 dev/main 时运行。
+    # - pull_request 事件直接运行。
+    # - issue_comment 事件只在“评论对象是 PR”且评论内容包含 @claude 时运行。
     if: |
       github.event_name == 'pull_request' ||
       (
         github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
-        contains(github.event.comment.body, '@claude') &&
-        (
-          github.event.issue.base.ref == 'dev' ||
-          github.event.issue.base.ref == 'main'
-        )
+        contains(github.event.comment.body, '@claude')
       )
 
     steps:
@@ -95,7 +85,8 @@ jobs:
             PR_NUM="${{ github.event.issue.number }}"
           fi
 
-          # issue_comment 事件已在 job.if 中校验了目标分支，这里无需再判断。
+          # issue_comment 事件无法在 on: 中过滤目标分支，
+          # 这里不再限制 base 分支，任何 PR 上的 @claude 评论都会触发审查。
 
           # 临时文件用于保存 Claude Code 的审查结果。
           # 使用 --body-file 可以避免长文本、换行和特殊字符在 shell 字符串中转义出错。

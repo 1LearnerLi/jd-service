@@ -7,7 +7,6 @@ from loguru import logger
 
 from app.business.base import BusinessResult
 from app.nlu.registry import IntentRegistry
-from app.nlu.models import NLUResult
 from app.dm.intent_controller import IntentController
 
 
@@ -15,7 +14,7 @@ async def business_node(state: dict) -> dict:
     """执行业务意图
 
     通过 IntentController.get_active_context() 构建含独立槽位的上下文，
-    业务完成后通过 Controller 标记意图完成并自动恢复挂起意图。
+    业务完成后清空槽位但保持意图 active，以便后续复用同一意图。
 
     Returns:
         包含 business_result 和可能 intents 更新的字典。
@@ -44,17 +43,20 @@ async def business_node(state: dict) -> dict:
         f"success={result.success}"
     )
 
-    # 业务完成时标记意图为 completed，Controller 自动恢复挂起意图
+    # 业务完成时清空槽位，保持意图 active 以便后续复用
+    # （不再标记为 completed，否则 to_snapshot 会过滤掉导致 NLU 上下文丢失）
     if result.success and isinstance(result.data, dict):
         if result.data.get("action") == "completed":
-            intent_update = IntentController.decide(
-                state,
-                NLUResult(
-                    action="complete",
-                    target_intent=active_intent,
-                    confidence=1.0,
-                ),
-            )
-            return {**intent_update, "business_result": result}
+            intents = dict(state.get("intents", {}))
+            if active_intent and active_intent in intents:
+                intents[active_intent]["slots"] = {}
+                logger.info(
+                    f"业务节点完成: intent={active_intent}, 槽位已清空，意图保持 active"
+                )
+                return {
+                    "intents": intents,
+                    "active_intent": active_intent,
+                    "business_result": result,
+                }
 
     return {"business_result": result}

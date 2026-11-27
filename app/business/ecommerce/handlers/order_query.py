@@ -7,6 +7,19 @@ from app.business.base import (
     BusinessResult,
     OptionItem,
 )
+from app.business.ecommerce.models.order import OrderInfo
+
+
+def _build_order_label(o: OrderInfo) -> str:
+    """构造订单按钮的展示文案 — 时间 + 商品 + 状态"""
+    create_date = o.create_time.strftime("%m-%d %H:%M") if o.create_time else "未知"
+    # 从关联的 details 中取商品名（已 eager load selectin）
+    product_names = ", ".join(d.sku_name for d in (o.details or [])[:2])
+    if len(o.details or []) > 2:
+        product_names += " 等"
+    if not product_names:
+        product_names = "未知商品"
+    return f"[{create_date}] {product_names}（{o.order_status}）"
 
 
 class OrderQueryHandler(IntentHandler):
@@ -31,7 +44,7 @@ class OrderQueryHandler(IntentHandler):
             orders = await self._repo.get_orders_by_user(ctx.user_id, limit=5)
             options = [
                 OptionItem(
-                    label=f"{o.order_id}（{o.order_status}）",
+                    label=_build_order_label(o),
                     value=o.order_id,
                 )
                 for o in orders
@@ -82,8 +95,20 @@ class OrderQueryHandler(IntentHandler):
             }
 
             logger.info(f"订单查询成功: {order_id}")
+            # 把详情拼成可见文本
+            status_text = f"订单状态：{order.order_status}"
+            time_text = f"创建时间：{order.create_time.strftime('%Y-%m-%d %H:%M') if order.create_time else '未知'}"
+            lines = [f"📋 订单 {order_id}", status_text, time_text, "", "商品明细："]
+            total_price = 0.0
+            for i, d in enumerate(detail_list, 1):
+                sku = await self._repo.get_sku_by_id(d["sku_id"])
+                price = float(sku.sku_price) if sku else 0.0
+                final = float(d["final_amount"])
+                total_price += final
+                lines.append(f"  {i}. {d['sku_name']} ×{d['sku_count']}  单价 ¥{price:.2f}  实付 ¥{final:.2f}")
+            lines.append(f"\n合计：¥{total_price:.2f}")
             return BusinessResult.completed(
-                message=f"📋 订单 {order_id} 详情已加载",
+                message="\n".join(lines),
                 **order_data,
             )
 

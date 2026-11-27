@@ -4,7 +4,7 @@
 
 **Goal:** 构建 Vue 3 + Vite + TypeScript + Element Plus 的智能客服前端，包含登录页和聊天主界面（会话列表 + 消息区 + SSE 流式展示）。
 
-**Architecture:** 单页应用（SPA），Vue Router 管理路由，Pinia 管理状态，fetch + EventSource 处理后端通信（REST + SSE）。组件树：LoginView → ChatView(SessionSidebar + ChatMain(MessageList + ChatInput))。
+**Architecture:** 单页应用（SPA），Vue Router 管理路由，Pinia 管理状态，fetch + EventSource 处理后端通信（REST + SSE）。组件树：LoginView → ChatView(SessionSidebar + ChatMain(MessageList + OptionList + ChatInput))。支持业务线 `ask_slot` 结构化响应，前端据此渲染选项按钮列表。
 
 **Tech Stack:** Vue 3.4+, Vite 6+, TypeScript 5.7+, Element Plus 2.x, Pinia 2.x, Vue Router 4.x
 
@@ -119,7 +119,10 @@ git commit -m "chore: 初始化前端项目（Vue 3 + Vite + TypeScript + Elemen
 **Interfaces:**
 - Produces:
   - `Session{ id, userId, title, status, createdAt, updatedAt }`
-  - `Message{ id, sessionId, role, content, intent, slotsJson, createdAt }`
+  - `Message{ id, sessionId, role, content, intent, slotsJson, businessData, createdAt }`
+  - `OptionItem{ label, value, disabled }`
+  - `AskSlotData{ action, message, slotToFill, options }`
+  - `BusinessActionData = AskSlotData | CompletedData | ...`
   - `APIResponse<T>{ success, data, error, meta }`
 
 - [ ] **Step 1: 创建 frontend/src/types/index.ts**
@@ -142,8 +145,34 @@ export interface Message {
   content: string
   intent: string | null
   slots_json: Record<string, unknown> | null
+  business_data: BusinessActionData | null
   created_at: string
 }
+
+/** 统一选项条目（与后端 OptionItem 对应） */
+export interface OptionItem {
+  label: string
+  value: string
+  disabled: boolean
+}
+
+/** ask_slot 业务动作数据 */
+export interface AskSlotData {
+  action: 'ask_slot'
+  message: string
+  slot_to_fill: string
+  options: OptionItem[]
+}
+
+/** completed 业务动作数据（extra 字段为动态扩展） */
+export interface CompletedData {
+  action: 'completed'
+  message: string
+  [key: string]: unknown
+}
+
+/** 业务动作联合类型 */
+export type BusinessActionData = AskSlotData | CompletedData | Record<string, unknown>
 
 /** 会话详情（含消息列表） */
 export interface SessionDetail {
@@ -157,6 +186,14 @@ export interface APIResponse<T = unknown> {
   data: T | null
   error: string | null
   meta: Record<string, unknown> | null
+}
+
+/** SSE done 事件的 JSON 数据 */
+export interface DoneData {
+  intent: string | null
+  slots_json: Record<string, unknown> | null
+  business_data: BusinessActionData | null
+  message: string
 }
 ```
 
@@ -179,12 +216,12 @@ git commit -m "feat: 添加前端 TypeScript 类型定义"
   - `createSession(userId: string): Promise<Session>`
   - `fetchSessions(userId: string): Promise<Session[]>`
   - `fetchSession(sessionId: string): Promise<SessionDetail>`
-  - `sendMessage(sessionId: string, content: string, onToken: (token: string) => void, onDone: () => void): Promise<void>`
+  - `sendMessage(sessionId: string, content: string, onToken: (token: string) => void, onDone: (doneData: DoneData) => void): Promise<void>`
 
 - [ ] **Step 1: 创建 frontend/src/api/client.ts**
 
 ```typescript
-import type { APIResponse, Session, SessionDetail } from '@/types'
+import type { APIResponse, Session, SessionDetail, DoneData } from '@/types'
 
 const BASE_URL = '/api/v1'
 
@@ -225,12 +262,22 @@ export async function fetchSession(sessionId: string): Promise<SessionDetail> {
   return request<SessionDetail>(`/sessions/${encodeURIComponent(sessionId)}`)
 }
 
-/** 发送消息，通过 SSE 流式接收回复 */
+/** 发送消息，通过 SSE 流式接收回复
+ *
+ * SSE 事件类型：
+ * - ``message``: 回复文本片段（逐块发送，前端逐字展示）
+ * - ``done``: 回复完成，附带结构化元数据
+ *
+ * done 事件的 data 为 JSON，包含 intent、slots_json、business_data、message 全量文本。
+ * business_data 的 action 决定前端是否渲染选项按钮：
+ * - ``ask_slot`` → 渲染 OptionList 让用户选择
+ * - ``completed`` → 直接展示文本
+ */
 export async function sendMessage(
   sessionId: string,
   content: string,
   onToken: (token: string) => void,
-  onDone: () => void,
+  onDone: (doneData: DoneData) => void,
 ): Promise<void> {
   const url = `${BASE_URL}/sessions/${encodeURIComponent(sessionId)}/messages?content=${encodeURIComponent(content)}`
 
@@ -248,6 +295,37 @@ export async function sendMessage(
   const decoder = new TextDecoder()
   let buffer = ''
 
+  // SSE 事件解析状态
+  let currentEvent = ''
+  let currentData = ''
+
+  // 局部累积完整消息文本，用于 done 事件回退
+  let fullMessage = ''
+
+  function processEvent(event: string, data: string) {
+    if (event === 'message' || event === '') {
+      // 文本片段
+      if (data) {
+        fullMessage += data
+        onToken(data)
+      }
+    } else if (event === 'done') {
+      // 流结束，data 为 JSON 元数据
+      try {
+        const doneData: DoneData = JSON.parse(data)
+        onDone(doneData)
+      } catch {
+        // 兼容旧版空 data
+        onDone({
+          intent: null,
+          slots_json: null,
+          business_data: null,
+          message: fullMessage,
+        } as DoneData)
+      }
+    }
+  }
+
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -257,20 +335,30 @@ export async function sendMessage(
     buffer = lines.pop() || ''
 
     for (const line of lines) {
-      if (line.startsWith('data:')) {
-        const data = line.slice(5).trim()
-        if (data) {
-          onToken(data)
+      if (line.startsWith('event:')) {
+        // 如果已有未处理的数据，先处理上一个事件
+        if (currentData !== '') {
+          processEvent(currentEvent, currentData)
         }
-      }
-      if (line.startsWith('event: done')) {
-        onDone()
-        return
+        currentEvent = line.slice(6).trim()
+        currentData = ''
+      } else if (line.startsWith('data:')) {
+        currentData = line.slice(5).trim()
+      } else if (line === '') {
+        // 空行表示事件结束
+        if (currentData !== '') {
+          processEvent(currentEvent, currentData)
+        }
+        currentEvent = ''
+        currentData = ''
       }
     }
   }
 
-  onDone()
+  // 处理最后可能残留的事件
+  if (currentData !== '') {
+    processEvent(currentEvent, currentData)
+  }
 }
 ```
 
@@ -407,15 +495,15 @@ git commit -m "feat: 添加会话 Pinia Store"
 
 **Interfaces:**
 - Produces:
-  - `useChatStore`: messages, isStreaming, streamingContent
-  - `fetchMessages(sessionId)`, `sendMessage(content)`, `clearMessages()`
+  - `useChatStore`: messages, isStreaming, streamingContent, pendingOptions
+  - `fetchMessages(sessionId)`, `sendMessage(content)`, `clearMessages()`, `selectOption(value)`
 
 - [ ] **Step 1: 创建 frontend/src/stores/chat.ts**
 
 ```typescript
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { Message } from '@/types'
+import type { Message, OptionItem, AskSlotData, BusinessActionData } from '@/types'
 import { fetchSession, sendMessage as apiSendMessage } from '@/api/client'
 
 export const useChatStore = defineStore('chat', () => {
@@ -423,12 +511,32 @@ export const useChatStore = defineStore('chat', () => {
   const isStreaming = ref(false)
   const streamingContent = ref('')
   const currentSessionId = ref<string | null>(null)
+  /** 待处理的选项按钮（ask_slot 时设置） */
+  const pendingOptions = ref<AskSlotData | null>(null)
 
   /** 获取会话消息列表 */
   async function loadMessages(sessionId: string) {
     currentSessionId.value = sessionId
+    pendingOptions.value = null
     const detail = await fetchSession(sessionId)
+    // 从历史消息中恢复最后一条 assistant 消息的 business_data
     messages.value = detail.messages
+    restorePendingOptions()
+  }
+
+  /** 从最后一条 assistant 消息恢复选项状态 */
+  function restorePendingOptions() {
+    const lastAssistant = [...messages.value].reverse().find(
+      (m) => m.role === 'assistant' && m.business_data,
+    )
+    if (lastAssistant?.business_data) {
+      const bd = lastAssistant.business_data as BusinessActionData
+      if (bd.action === 'ask_slot') {
+        pendingOptions.value = bd as AskSlotData
+        return
+      }
+    }
+    pendingOptions.value = null
   }
 
   /** 发送消息 */
@@ -442,9 +550,13 @@ export const useChatStore = defineStore('chat', () => {
       content,
       intent: null,
       slots_json: null,
+      business_data: null,
       created_at: new Date().toISOString(),
     }
     messages.value.push(userMsg)
+
+    // 清空上次的 pendingOptions
+    pendingOptions.value = null
 
     // 开始流式回复
     isStreaming.value = true
@@ -457,18 +569,25 @@ export const useChatStore = defineStore('chat', () => {
         (token) => {
           streamingContent.value += token
         },
-        () => {
+        (doneData) => {
           // 流式结束，将内容作为完整消息添加
-          if (streamingContent.value) {
+          const businessData = doneData.business_data as BusinessActionData | null
+          if (streamingContent.value || doneData.message) {
             const assistantMsg: Message = {
               id: Date.now(),
               role: 'assistant',
-              content: streamingContent.value,
-              intent: null,
-              slots_json: null,
+              content: doneData.message || streamingContent.value,
+              intent: doneData.intent,
+              slots_json: doneData.slots_json,
+              business_data: businessData,
               created_at: new Date().toISOString(),
             }
             messages.value.push(assistantMsg)
+
+            // 如果是 ask_slot，设置待选选项
+            if (businessData?.action === 'ask_slot') {
+              pendingOptions.value = businessData as AskSlotData
+            }
           }
           streamingContent.value = ''
           isStreaming.value = false
@@ -481,18 +600,28 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /** 用户从选项按钮中选择一个值 */
+  async function selectOption(value: string) {
+    if (!pendingOptions.value) return
+    // 将选中的值作为用户输入发送
+    await sendMessage(value)
+  }
+
   /** 清空消息 */
   function clearMessages() {
     messages.value = []
     currentSessionId.value = null
+    pendingOptions.value = null
   }
 
   return {
     messages,
     isStreaming,
     streamingContent,
+    pendingOptions,
     loadMessages,
     sendMessage,
+    selectOption,
     clearMessages,
   }
 })
@@ -986,6 +1115,81 @@ git commit -m "feat: 添加消息气泡和消息列表组件"
 
 ---
 
+### Task 9.5: OptionList 选项按钮组件
+
+**背景说明：** 后端 `BusinessResult.ask_slot()` 返回结构化数据（`action: "ask_slot"`, `message`, `slot_to_fill`, `options: [{label, value, disabled}]`），前端根据该结构渲染可点击的选项按钮列表。用户点击选项后，将 `value` 作为消息发送。
+
+**Files:**
+- Create: `frontend/src/components/OptionList.vue`
+
+- [ ] **Step 1: 创建 frontend/src/components/OptionList.vue**
+
+```vue
+<template>
+  <div v-if="data" class="option-list">
+    <div class="option-message">{{ data.message }}</div>
+    <div class="option-buttons">
+      <el-button
+        v-for="opt in data.options"
+        :key="opt.value"
+        :disabled="opt.disabled"
+        type="outline"
+        class="option-btn"
+        @click="$emit('select', opt.value)"
+      >
+        {{ opt.label }}
+      </el-button>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import type { AskSlotData } from '@/types'
+
+defineProps<{
+  data: AskSlotData | null
+}>()
+
+defineEmits<{
+  select: [value: string]
+}>()
+</script>
+
+<style scoped lang="scss">
+.option-list {
+  padding: 8px 32px 16px;
+}
+
+.option-message {
+  font-size: 13px;
+  color: #909399;
+  margin-bottom: 10px;
+}
+
+.option-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.option-btn {
+  max-width: 100%;
+  white-space: normal;
+  word-break: break-word;
+  text-align: left;
+}
+</style>
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add frontend/src/components/OptionList.vue
+git commit -m "feat: 添加选项按钮组件（支持 ask_slot 结构化数据）"
+```
+
+---
+
 ### Task 10: ChatInput 组件
 
 **Files:**
@@ -1094,6 +1298,12 @@ git commit -m "feat: 添加聊天输入框组件"
       :streaming-content="chatStore.streamingContent"
     />
 
+    <!-- 选项按钮（ask_slot 时显示在消息区和输入框之间） -->
+    <OptionList
+      :data="chatStore.pendingOptions"
+      @select="handleOptionSelect"
+    />
+
     <!-- 输入框 -->
     <ChatInput
       :is-streaming="chatStore.isStreaming"
@@ -1108,6 +1318,7 @@ import { useSessionStore } from '@/stores/session'
 import { useChatStore } from '@/stores/chat'
 import MessageList from './MessageList.vue'
 import ChatInput from './ChatInput.vue'
+import OptionList from './OptionList.vue'
 
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
@@ -1121,6 +1332,10 @@ const sessionTitle = computed(() => {
 
 async function handleSend(content: string) {
   await chatStore.sendMessage(content)
+}
+
+async function handleOptionSelect(value: string) {
+  await chatStore.selectOption(value)
 }
 </script>
 
@@ -1277,7 +1492,9 @@ cd frontend && npm run dev
 2. 输入 user_id（默认 1001），点击"进入客服"，应跳转到聊天页
 3. 点击"创建新会话"，应创建成功并出现在左侧
 4. 输入消息（如"你好"），发送，应看到用户消息和 AI 流式回复
-5. 切换会话，消息列表应正确更新
+5. 输入业务意图（如"查订单"），后端应返回 ask_slot 结构化数据，前端渲染选项按钮
+6. 点击选项按钮，应自动发送选中值（如订单号），继续对话
+7. 切换会话，消息列表和 pendingOptions 应正确更新
 
 - [ ] **Step 4: Commit**
 

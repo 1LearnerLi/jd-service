@@ -62,21 +62,25 @@
 | session_id | VARCHAR(50) FK → sessions.id | 关联会话 |
 | role | ENUM('user', 'assistant') | 消息角色 |
 | content | TEXT | 消息内容 |
-| intent | VARCHAR(50) | 关联意图名 |
-| slots_json | JSON | 槽位快照 |
+| intent | VARCHAR(50) | 关联意图名（用于展示/日志/历史记录） |
+| slots_json | JSON | 本轮增量槽位更新快照（用于展示/日志/历史记录） |
 | created_at | DATETIME | 创建时间 |
 
 ## NLU 层
 
 ### 意图识别方式
 
-基于 LLM prompt 分类：将所有意图定义通过 system prompt 喂给 LLM，输出结构化 JSON（意图名 + 槽位键值对 + 缺失槽位）。
+基于 LLM prompt 分类：将所有意图定义和会话中已有意图状态通过 system prompt + user prompt 喂给 LLM，输出增量式 JSON（action + target_intent + slots_update）。NLU 只描述"本轮发生了什么变化"，不输出整个会话的完整意图状态。
 
 ### 核心模型
 
-- `IntentDefinition`: 意图定义（name, description, required_slots, optional_slots, handler）
+- `IntentDefinition`: 意图定义（name, description, required_slots, optional_slots）
 - `SlotDef`: 槽位定义（name, description, ask_prompt）
 - `NLUResult`: NLU 层增量式输出（action, target_intent, confidence, slots_update）
+  - `action`: 变化类型 — `continue` / `switch` / `new` / `cancel` / `complete`
+  - `target_intent`: 目标意图名
+  - `confidence`: 置信度 0-1
+  - `slots_update`: 本次新增/更新的槽位（增量，仅对目标意图有效）
 
 ### 平台意图
 
@@ -157,7 +161,7 @@ class DialogState(TypedDict):
 
 ```
 entry → nlu → [条件路由]
-  ├─ 平台意图 (unknown/transfer_human) → fallback → response
+  ├─ 平台意图 / 无活跃意图 → fallback → response
   └─ 业务意图 → business → response
 ```
 

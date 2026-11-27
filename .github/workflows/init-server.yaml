@@ -1,0 +1,70 @@
+# 服务器首次初始化工作流
+#
+# 手动触发（workflow_dispatch），SSH 到阿里云服务器执行一次性初始化：
+#   - 配置 SSH 认证、克隆项目、注入密钥到 docker/.env、docker compose up -d --build
+#
+# 需要在 GitHub Secrets 中配置以下密钥：
+#   SSH_HOST              - 阿里云服务器 IP 或域名
+#   SSH_USER              - SSH 登录用户名（默认 root）
+#   SSH_PORT              - SSH 端口（默认 22）
+#   GH_SSH_PRIVATE_KEY    - SSH 私钥，同时用于两个场景：
+#                           ① Actions 免密登录阿里云服务器
+#                           ② 传给服务器用于 git clone（需将对应公钥添加到仓库 Deploy Keys）
+#
+#   以下密钥会自动注入到服务器 docker/.env 中（可选但推荐配置）：
+#   OPENAI_API_KEY     - LLM API Key
+#   OPENAI_BASE_URL    - LLM 接口地址
+#   LLM_MODEL          - LLM 模型名称
+#   DASHSCOPE_API_KEY  - DashScope API Key
+#   LOG_LEVEL          - 日志级别
+#
+# 使用方式：GitHub → Actions → Init Server → Run workflow
+
+name: Init Server
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  init:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v6
+
+      - name: 上传初始化脚本
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER || 'root' }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          key: ${{ secrets.GH_SSH_PRIVATE_KEY }}
+          source: scripts/init-server.sh,scripts/deploy.conf
+          target: /tmp/
+          overwrite: true
+
+      - name: 执行服务器初始化
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          REPO_URL: git@github.com:${{ github.repository }}.git
+          GH_SSH_PRIVATE_KEY: ${{ secrets.GH_SSH_PRIVATE_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          LOG_LEVEL: ${{ secrets.LOG_LEVEL }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER || 'root' }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          key: ${{ secrets.GH_SSH_PRIVATE_KEY }}
+          request_pty: true
+          command_timeout: 60m
+          envs: REPO_URL,GH_SSH_PRIVATE_KEY,OPENAI_API_KEY,OPENAI_BASE_URL,LLM_MODEL,DASHSCOPE_API_KEY,LOG_LEVEL
+          script: |
+            set -euo pipefail
+            bash /tmp/scripts/init-server.sh

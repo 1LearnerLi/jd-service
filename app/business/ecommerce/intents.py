@@ -2,6 +2,7 @@
 from app.nlu.models import IntentDefinition, SlotDef
 from app.business.ecommerce.handlers.order_query import OrderQueryHandler
 from app.business.ecommerce.handlers.postsale_return import PostsaleReturnHandler
+from app.business.ecommerce.handlers.product_inquiry import ProductInquiryHandler
 
 # 业务线统一导出的意图列表，变量名固定为 INTENTS
 # 每个意图通过 handler 字段绑定对应的处理器类
@@ -50,6 +51,6 @@ INTENTS: list[IntentDefinition] = [
                 ask_prompt="请问您想了解什么商品信息？",
             ),
         ],
-        handler=None,  # 暂未实现
+        handler=ProductInquiryHandler,
     ),
 ]
