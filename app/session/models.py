@@ -29,6 +29,10 @@ class Session(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+    intents_json: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True,
+        comment="会话意图状态快照: {intent_name: {status, slots, confidence, ...}}"
+    )
 
     messages = relationship("Message", back_populates="session", lazy="selectin")
 

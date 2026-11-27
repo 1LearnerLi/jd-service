@@ -20,7 +20,6 @@ class TestSlotDef:
     def test_slot_def_without_ask_prompt(self):
         """验证 SlotDef 可以不提供 ask_prompt"""
         slot = SlotDef(name="sku_name", description="商品名称")
-        # ask_prompt 使用默认值
         assert slot.name == "sku_name"
         assert hasattr(slot, "ask_prompt")
 
@@ -88,58 +87,58 @@ class TestIntentDefinition:
 
 
 class TestNLUResult:
-    """NLUResult NLU 输出测试"""
+    """NLUResult NLU 输出测试（增量式输出）"""
 
     def test_nlu_result_creation(self):
         """验证 NLUResult 基本创建"""
         result = NLUResult(
-            intent="order_query",
+            action="new",
+            target_intent="order_query",
             confidence=0.95,
-            slots={"order_id": "123"},
-            missing_slots=[],
+            slots_update={"order_id": "123"},
         )
-        assert result.intent == "order_query"
+        assert result.action == "new"
+        assert result.target_intent == "order_query"
         assert result.confidence == 0.95
-        assert result.slots == {"order_id": "123"}
-        assert result.missing_slots == []
+        assert result.slots_update == {"order_id": "123"}
 
     def test_nlu_result_serialization(self):
         """验证 NLUResult 可以序列化为字典"""
         result = NLUResult(
-            intent="order_query",
+            action="new",
+            target_intent="order_query",
             confidence=0.95,
-            slots={"order_id": "123"},
-            missing_slots=[],
+            slots_update={"order_id": "123"},
         )
         d = result.model_dump()
-        assert d["intent"] == "order_query"
+        assert d["action"] == "new"
+        assert d["target_intent"] == "order_query"
         assert d["confidence"] == 0.95
-        assert d["slots"] == {"order_id": "123"}
+        assert d["slots_update"] == {"order_id": "123"}
 
-    def test_nlu_result_with_missing_slots(self):
-        """验证 NLUResult 包含缺失槽位"""
+    def test_nlu_result_with_continue_action(self):
+        """验证 continue action"""
         result = NLUResult(
-            intent="order_query",
+            action="continue",
+            target_intent="order_query",
             confidence=0.8,
-            slots={},
-            missing_slots=["order_id"],
+            slots_update={"order_id": "456"},
         )
-        assert result.missing_slots == ["order_id"]
+        assert result.action == "continue"
+        assert result.slots_update == {"order_id": "456"}
 
     def test_nlu_result_default_values(self):
         """验证 NLUResult 默认值"""
-        result = NLUResult(
-            intent="unknown",
-            confidence=0.0,
-        )
-        assert result.slots == {}
-        assert result.missing_slots == []
+        result = NLUResult()
+        assert result.action == "continue"
+        assert result.target_intent == ""
+        assert result.confidence == 0.0
+        assert result.slots_update == {}
 
     def test_nlu_result_confidence_range(self):
         """验证 confidence 在 0-1 范围内"""
-        # 0 和 1 应该是合法的
-        result_zero = NLUResult(intent="test", confidence=0.0)
+        result_zero = NLUResult(action="new", target_intent="test", confidence=0.0)
         assert result_zero.confidence == 0.0
 
-        result_one = NLUResult(intent="test", confidence=1.0)
+        result_one = NLUResult(action="new", target_intent="test", confidence=1.0)
         assert result_one.confidence == 1.0

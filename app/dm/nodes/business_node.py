@@ -5,37 +5,30 @@
 """
 from loguru import logger
 
-from app.business.base import BusinessContext, BusinessResult
+from app.business.base import BusinessResult
 from app.nlu.registry import IntentRegistry
+from app.nlu.models import NLUResult
+from app.dm.intent_controller import IntentController
 
 
 async def business_node(state: dict) -> dict:
     """执行业务意图
 
-    根据 active_intent 通过 IntentRegistry 查找对应的 IntentHandler 并执行。
-    Handler 内部按 required_slots 顺序逐槽位检查：
-    - 槽位缺失 → 返回 BusinessResult.ask_slot()（含 options 列表供前端渲染）
-    - 槽位齐全 → 执行并返回 BusinessResult.completed()
-    - 执行失败 → 返回 BusinessResult.error()
+    通过 IntentController.get_active_context() 构建含独立槽位的上下文，
+    业务完成后通过 Controller 标记意图完成并自动恢复挂起意图。
 
     Returns:
-        包含 business_result 的更新字典。
+        包含 business_result 和可能 intents 更新的字典。
     """
     active_intent = state.get("active_intent", "")
 
     handler_cls = IntentRegistry.get_handler(active_intent)
     if handler_cls is None:
         logger.warning(f"未找到意图处理器: {active_intent}")
-        return {
-            "business_result": BusinessResult.error("该功能暂未开放"),
-        }
+        return {"business_result": BusinessResult.error("该功能暂未开放")}
 
-    ctx = BusinessContext(
-        session_id=state.get("session_id", ""),
-        user_id=state.get("user_id", ""),
-        intent=active_intent,
-        slots=state.get("slots", {}),
-    )
+    # 通过 Controller 构建上下文（含该意图的独立槽位）
+    ctx = IntentController.get_active_context(state)
 
     handler = handler_cls()
     result = await handler.handle(ctx)
@@ -50,4 +43,18 @@ async def business_node(state: dict) -> dict:
         f"action={action}, "
         f"success={result.success}"
     )
+
+    # 业务完成时标记意图为 completed，Controller 自动恢复挂起意图
+    if result.success and isinstance(result.data, dict):
+        if result.data.get("action") == "completed":
+            intent_update = IntentController.decide(
+                state,
+                NLUResult(
+                    action="complete",
+                    target_intent=active_intent,
+                    confidence=1.0,
+                ),
+            )
+            return {**intent_update, "business_result": result}
+
     return {"business_result": result}

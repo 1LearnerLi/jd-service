@@ -16,7 +16,6 @@ class TestGraphBuild:
         """验证 build_dialog_graph 返回编译后的图"""
         graph = build_dialog_graph()
         assert graph is not None
-        # LangGraph 编译后的图应该有 ainvoke 方法
         assert hasattr(graph, "ainvoke")
         assert hasattr(graph, "get_graph")
 
@@ -35,7 +34,6 @@ class TestGraphBuild:
         """验证每次调用 build_dialog_graph 返回新编译实例"""
         g1 = build_dialog_graph()
         g2 = build_dialog_graph()
-        # 不同的编译实例
         assert g1 is not g2
 
 
@@ -72,10 +70,9 @@ class TestGraphIntegration:
             "user_id": "user-test",
             "user_input": "测试输入",
             "messages": [],
+            "all_intents": [],
             "intents": {},
             "active_intent": "",
-            "slots": {},
-            "missing_slots": [],
             "business_result": None,
             "final_response": "",
             "should_fallback": False,
@@ -89,10 +86,10 @@ class TestGraphIntegration:
         self._setup_mock_classifier(
             monkeypatch,
             NLUResult(
-                intent="unknown",
+                action="new",
+                target_intent="unknown",
                 confidence=0.0,
-                slots={},
-                missing_slots=[],
+                slots_update={},
             ),
         )
 
@@ -123,10 +120,10 @@ class TestGraphIntegration:
         self._setup_mock_classifier(
             monkeypatch,
             NLUResult(
-                intent="transfer_human",
+                action="new",
+                target_intent="transfer_human",
                 confidence=0.9,
-                slots={},
-                missing_slots=[],
+                slots_update={},
             ),
         )
 
@@ -154,10 +151,10 @@ class TestGraphIntegration:
         self._setup_mock_classifier(
             monkeypatch,
             NLUResult(
-                intent="order_query",
+                action="new",
+                target_intent="order_query",
                 confidence=0.95,
-                slots={"order_id": "ORD-001"},
-                missing_slots=[],
+                slots_update={"order_id": "ORD-001"},
             ),
         )
 
@@ -189,10 +186,12 @@ class TestGraphIntegration:
 
         final_state = await graph.ainvoke(state)
 
-        assert final_state["active_intent"] == "order_query"
+        assert final_state["active_intent"] == ""
         assert final_state["business_result"] is not None
         assert final_state["should_fallback"] is False
         assert "ORD-001" in final_state["final_response"]
+        # 业务完成后意图状态为 completed
+        assert final_state["intents"]["order_query"]["status"] == "completed"
 
     @pytest.mark.asyncio
     async def test_business_ask_slot_flow(self, monkeypatch):
@@ -200,10 +199,10 @@ class TestGraphIntegration:
         self._setup_mock_classifier(
             monkeypatch,
             NLUResult(
-                intent="postsale_return",
+                action="new",
+                target_intent="postsale_return",
                 confidence=0.85,
-                slots={},
-                missing_slots=["order_id", "postsale_type", "postsale_reason"],
+                slots_update={},
             ),
         )
 
@@ -244,10 +243,10 @@ class TestGraphIntegration:
         self._setup_mock_classifier(
             monkeypatch,
             NLUResult(
-                intent="order_query",
+                action="new",
+                target_intent="order_query",
                 confidence=0.9,
-                slots={"order_id": "INVALID"},
-                missing_slots=[],
+                slots_update={"order_id": "INVALID"},
             ),
         )
 
@@ -284,21 +283,11 @@ class TestGraphIntegration:
         # 收集边
         edges = list(graph_spec.edges)
         edge_pairs = set()
-        conditional_edges = set()
         for edge in edges:
             if edge.source and edge.target:
                 edge_pairs.add((edge.source, edge.target))
-            elif edge.source:
-                # 条件边
-                pass
 
         # 验证关键连接存在
-        # nlu → business (业务意图)
-        # nlu → fallback (平台意图)
-        # business → response
-        # fallback → response
-        # response → END
-
         assert ("business", "response") in edge_pairs
         assert ("fallback", "response") in edge_pairs
         # 验证 nlu 有出路（条件路由）

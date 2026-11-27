@@ -37,18 +37,21 @@ class IntentDefinition(BaseModel):
 
 
 class NLUResult(BaseModel):
-    """NLU 层输出
+    """NLU 层输出 — 增量式意图变化
 
-    意图分类器返回的结构化结果。
+    只描述"本轮发生了什么变化"，不输出整个会话的意图状态。
     """
 
-    intent: str = Field(..., description="识别的意图名")
-    confidence: float = Field(..., description="置信度 0-1")
-    slots: dict[str, object] = Field(
-        default_factory=dict,
-        description="已提取的槽位",
+    action: str = Field(
+        default="continue",
+        description="变化类型：continue | switch | new | cancel | complete",
     )
-    missing_slots: list[str] = Field(
-        default_factory=list,
-        description="缺失的必填槽位",
+    target_intent: str = Field(
+        default="",
+        description="目标意图名",
+    )
+    confidence: float = Field(default=0.0, description="置信度 0-1")
+    slots_update: dict[str, object] = Field(
+        default_factory=dict,
+        description="本次新增/更新的槽位（增量，仅对目标意图有效）",
     )

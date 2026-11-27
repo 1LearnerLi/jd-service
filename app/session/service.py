@@ -60,6 +60,31 @@ class SessionService:
         )
         await db.commit()
 
+    @staticmethod
+    async def save_intents_snapshot(
+        db: AsyncSession, session_id: str, intents: dict
+    ) -> None:
+        """保存意图容器快照到 Session.intents_json"""
+        from app.dm.intent_controller import IntentController
+        snapshot = IntentController.to_snapshot(intents)
+        await db.execute(
+            update(Session)
+            .where(Session.id == session_id)
+            .values(intents_json=snapshot)
+        )
+        await db.commit()
+
+    @staticmethod
+    async def load_intents_snapshot(
+        db: AsyncSession, session_id: str
+    ) -> dict | None:
+        """从 Session.intents_json 加载意图容器快照"""
+        from app.dm.intent_controller import IntentController
+        session = await SessionService.get_session(db, session_id)
+        if session and session.intents_json:
+            return IntentController.from_snapshot(session.intents_json)
+        return None
+
 
 class MessageService:
     """消息管理服务"""

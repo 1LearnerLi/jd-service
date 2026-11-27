@@ -4,14 +4,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.dm.nodes.nlu_node import nlu_node, get_classifier, reset_classifier
-from app.nlu.models import NLUResult
 
 
 class TestNluNode:
     """nlu_node 函数测试"""
 
     @staticmethod
-    def _make_mock_classifier(return_value: NLUResult):
+    def _make_mock_classifier(return_value):
         """构造 mock IntentClassifier"""
         classifier = MagicMock()
         classifier.classify = AsyncMock(return_value=return_value)
@@ -22,14 +21,15 @@ class TestNluNode:
         reset_classifier()
 
     @pytest.mark.asyncio
-    async def test_nlu_node_basic_classification(self, monkeypatch):
-        """验证 NLU 节点基本分类功能"""
+    async def test_nlu_node_new_intent(self, monkeypatch):
+        """验证创建新意图"""
+        from app.nlu.models import NLUResult
         mock_classifier = self._make_mock_classifier(
             NLUResult(
-                intent="order_query",
+                action="new",
+                target_intent="order_query",
                 confidence=0.95,
-                slots={"order_id": "ORD-001"},
-                missing_slots=[],
+                slots_update={"order_id": "ORD-001"},
             )
         )
         monkeypatch.setattr(
@@ -41,26 +41,30 @@ class TestNluNode:
             "session_id": "sess-001",
             "user_id": "user-001",
             "user_input": "帮我查订单 ORD-001",
-            "slots": {},
+            "all_intents": [],
+            "intents": {},
             "active_intent": "",
+            "messages": [],
         }
 
         result = await nlu_node(state)
 
         assert result["active_intent"] == "order_query"
-        assert result["slots"] == {"order_id": "ORD-001"}
-        assert result["missing_slots"] == []
+        assert "order_query" in result["intents"]
+        assert result["intents"]["order_query"]["status"] == "active"
+        assert result["intents"]["order_query"]["slots"] == {"order_id": "ORD-001"}
         assert result["should_fallback"] is False
 
     @pytest.mark.asyncio
-    async def test_nlu_node_merges_slots(self, monkeypatch):
-        """验证 NLU 节点合并已有槽位和新提取槽位"""
+    async def test_nlu_node_continue_merges_slots(self, monkeypatch):
+        """验证 continue action 合并槽位到活跃意图"""
+        from app.nlu.models import NLUResult
         mock_classifier = self._make_mock_classifier(
             NLUResult(
-                intent="postsale_return",
+                action="continue",
+                target_intent="postsale_return",
                 confidence=0.88,
-                slots={"postsale_type": "refund_only"},
-                missing_slots=["postsale_reason"],
+                slots_update={"postsale_type": "refund_only"},
             )
         )
         monkeypatch.setattr(
@@ -72,29 +76,83 @@ class TestNluNode:
             "session_id": "sess-001",
             "user_id": "user-001",
             "user_input": "仅退款",
-            "slots": {"order_id": "ORD-001"},
+            "all_intents": [],
+            "intents": {
+                "postsale_return": {
+                    "name": "postsale_return",
+                    "confidence": 0.85,
+                    "status": "active",
+                    "slots": {"order_id": "ORD-001"},
+                    "required_slots": ["order_id", "postsale_type", "postsale_reason"],
+                    "optional_slots": [],
+                }
+            },
             "active_intent": "postsale_return",
+            "messages": [],
         }
 
         result = await nlu_node(state)
 
-        # 已有 order_id，新提取 postsale_type，应合并
-        assert result["slots"] == {
+        assert result["active_intent"] == "postsale_return"
+        assert result["intents"]["postsale_return"]["slots"] == {
             "order_id": "ORD-001",
             "postsale_type": "refund_only",
         }
-        assert result["active_intent"] == "postsale_return"
-        assert result["missing_slots"] == ["postsale_reason"]
+
+    @pytest.mark.asyncio
+    async def test_nlu_node_new_suspends_active(self, monkeypatch):
+        """验证 new action 挂起当前活跃意图"""
+        from app.nlu.models import NLUResult
+        mock_classifier = self._make_mock_classifier(
+            NLUResult(
+                action="new",
+                target_intent="order_query",
+                confidence=0.92,
+                slots_update={"order_id": "ORD-003"},
+            )
+        )
+        monkeypatch.setattr(
+            "app.dm.nodes.nlu_node._classifier",
+            mock_classifier,
+        )
+
+        state = {
+            "session_id": "sess-001",
+            "user_id": "user-001",
+            "user_input": "查订单 ORD-003",
+            "all_intents": [],
+            "intents": {
+                "postsale_return": {
+                    "name": "postsale_return",
+                    "confidence": 0.85,
+                    "status": "active",
+                    "slots": {"order_id": "ORD-001"},
+                    "required_slots": ["order_id", "postsale_type", "postsale_reason"],
+                    "optional_slots": [],
+                }
+            },
+            "active_intent": "postsale_return",
+            "messages": [],
+        }
+
+        result = await nlu_node(state)
+
+        # 旧意图被挂起
+        assert result["intents"]["postsale_return"]["status"] == "suspended"
+        # 新意图激活
+        assert result["intents"]["order_query"]["status"] == "active"
+        assert result["active_intent"] == "order_query"
 
     @pytest.mark.asyncio
     async def test_nlu_node_unknown_intent(self, monkeypatch):
         """验证 NLU 节点处理 unknown 意图"""
+        from app.nlu.models import NLUResult
         mock_classifier = self._make_mock_classifier(
             NLUResult(
-                intent="unknown",
+                action="new",
+                target_intent="unknown",
                 confidence=0.1,
-                slots={},
-                missing_slots=[],
+                slots_update={},
             )
         )
         monkeypatch.setattr(
@@ -104,8 +162,10 @@ class TestNluNode:
 
         state = {
             "user_input": "asdfghjkl",
-            "slots": {},
+            "all_intents": [],
+            "intents": {},
             "active_intent": "",
+            "messages": [],
         }
 
         result = await nlu_node(state)
@@ -116,12 +176,13 @@ class TestNluNode:
     @pytest.mark.asyncio
     async def test_nlu_node_transfer_human(self, monkeypatch):
         """验证 NLU 节点处理转人工意图"""
+        from app.nlu.models import NLUResult
         mock_classifier = self._make_mock_classifier(
             NLUResult(
-                intent="transfer_human",
+                action="new",
+                target_intent="transfer_human",
                 confidence=0.92,
-                slots={},
-                missing_slots=[],
+                slots_update={},
             )
         )
         monkeypatch.setattr(
@@ -131,8 +192,10 @@ class TestNluNode:
 
         state = {
             "user_input": "我要找人工客服",
-            "slots": {},
+            "all_intents": [],
+            "intents": {},
             "active_intent": "",
+            "messages": [],
         }
 
         result = await nlu_node(state)
@@ -142,14 +205,15 @@ class TestNluNode:
 
     @pytest.mark.asyncio
     async def test_nlu_node_passes_context_to_classifier(self, monkeypatch):
-        """验证 NLU 节点将当前上下文正确传递给分类器"""
+        """验证 NLU 节点将 all_intents 和 session_intents 传给分类器"""
+        from app.nlu.models import NLUResult
         mock_classifier = MagicMock()
         mock_classifier.classify = AsyncMock(
             return_value=NLUResult(
-                intent="order_query",
-                confidence=0.8,
-                slots={"order_id": "999"},
-                missing_slots=[],
+                action="continue",
+                target_intent="order_query",
+                confidence=0.9,
+                slots_update={"order_id": "999"},
             )
         )
         monkeypatch.setattr(
@@ -157,6 +221,17 @@ class TestNluNode:
             mock_classifier,
         )
 
+        all_intents = [{"name": "order_query", "description": "订单查询"}]
+        session_intents = {
+            "order_query": {
+                "name": "order_query",
+                "confidence": 0.9,
+                "status": "active",
+                "slots": {},
+                "required_slots": ["order_id"],
+                "optional_slots": [],
+            }
+        }
         messages = [
             {"role": "user", "content": "查订单"},
             {"role": "assistant", "content": "请选择要查询的订单"},
@@ -164,7 +239,8 @@ class TestNluNode:
 
         state = {
             "user_input": "999",
-            "slots": {"order_id": "888"},
+            "all_intents": all_intents,
+            "intents": session_intents,
             "active_intent": "order_query",
             "messages": messages,
         }
@@ -174,20 +250,61 @@ class TestNluNode:
         # 验证 classify 被调用时参数正确
         mock_classifier.classify.assert_called_once_with(
             user_input="999",
-            current_slots={"order_id": "888"},
+            all_intents=all_intents,
+            session_intents=session_intents,
             active_intent="order_query",
             messages=messages,
         )
 
     @pytest.mark.asyncio
-    async def test_nlu_node_with_empty_state(self, monkeypatch):
-        """验证 NLU 节点处理空 state"""
+    async def test_nlu_node_cancel_intent(self, monkeypatch):
+        """验证 cancel action"""
+        from app.nlu.models import NLUResult
         mock_classifier = self._make_mock_classifier(
             NLUResult(
-                intent="unknown",
+                action="cancel",
+                target_intent="order_query",
+                confidence=0.9,
+                slots_update={},
+            )
+        )
+        monkeypatch.setattr(
+            "app.dm.nodes.nlu_node._classifier",
+            mock_classifier,
+        )
+
+        state = {
+            "user_input": "算了不查了",
+            "all_intents": [],
+            "intents": {
+                "order_query": {
+                    "name": "order_query",
+                    "confidence": 0.9,
+                    "status": "active",
+                    "slots": {},
+                    "required_slots": ["order_id"],
+                    "optional_slots": [],
+                }
+            },
+            "active_intent": "order_query",
+            "messages": [],
+        }
+
+        result = await nlu_node(state)
+
+        assert result["intents"]["order_query"]["status"] == "cancelled"
+        assert result["active_intent"] == ""
+
+    @pytest.mark.asyncio
+    async def test_nlu_node_with_empty_state(self, monkeypatch):
+        """验证 NLU 节点处理空 state"""
+        from app.nlu.models import NLUResult
+        mock_classifier = self._make_mock_classifier(
+            NLUResult(
+                action="new",
+                target_intent="unknown",
                 confidence=0.0,
-                slots={},
-                missing_slots=[],
+                slots_update={},
             )
         )
         monkeypatch.setattr(
@@ -198,7 +315,6 @@ class TestNluNode:
         result = await nlu_node({})
 
         assert result["active_intent"] == "unknown"
-        assert result["slots"] == {}
         assert result["should_fallback"] is True
 
 

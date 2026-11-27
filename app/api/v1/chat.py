@@ -13,6 +13,7 @@ from app.core.database import get_db
 from app.core.response import success_response
 from app.session.service import SessionService, MessageService
 from app.dm.graph import build_dialog_graph
+from app.dm.intent_controller import IntentController
 
 router = APIRouter(prefix="/sessions", tags=["会话管理"])
 
@@ -131,43 +132,50 @@ async def send_message(
         for m in history_messages
     ]
 
-    # ── 5. 执行对话图 ──────────────────────────────────
+    # ── 5. 从 DB 恢复意图状态 ────────────────────────────
+    saved_intents = await SessionService.load_intents_snapshot(db, session_id)
+    initial_intents = saved_intents if saved_intents else {}
+
+    # ── 6. 构造初始状态 ──────────────────────────────────
     initial_state = {
         "session_id": session_id,
         "user_id": session.user_id,
         "user_input": content,
         "messages": messages_context,
-        "intents": {},
-        "active_intent": "",
-        "slots": {},
-        "missing_slots": [],
+        "all_intents": IntentController.build_all_intents(),
+        "intents": initial_intents,
+        "active_intent": IntentController.find_active(initial_intents),
         "business_result": None,
         "final_response": "",
         "should_fallback": False,
     }
 
+    # ── 7. 执行对话图 ──────────────────────────────────
     try:
         final_state = await _dialog_graph.ainvoke(initial_state)
         reply = final_state.get("final_response", "抱歉，我不知道该如何回答。")
         active_intent = final_state.get("active_intent", "")
-        slots = final_state.get("slots", {})
     except Exception:
         logger.exception("对话图执行失败")
         reply = "抱歉，服务暂时不可用，请稍后再试。"
         active_intent = ""
-        slots = {}
 
-    # ── 6. 保存 AI 回复 ──────────────────────────────────
+    # ── 8. 持久化意图状态 ────────────────────────────────
+    await SessionService.save_intents_snapshot(
+        db, session_id, final_state.get("intents", {})
+    )
+
+    # ── 9. 保存 AI 回复 ──────────────────────────────────
     await MessageService.add_message(
         db,
         session_id,
         "assistant",
         reply,
         intent=active_intent if active_intent else None,
-        slots=slots if slots else None,
+        slots=None,  # 槽位信息已在 intents_json 中持久化
     )
 
-    # ── 7. SSE 流式返回 ──────────────────────────────────
+    # ── 10. SSE 流式返回 ─────────────────────────────────
     async def event_generator():
         """逐块发送回复文本，模拟 LLM 流式输出效果"""
         for i in range(0, len(reply), _SSE_CHUNK_SIZE):
