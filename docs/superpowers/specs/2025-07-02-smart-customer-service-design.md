@@ -50,6 +50,7 @@
 | user_id | VARCHAR(50) NOT NULL | 用户 ID |
 | title | VARCHAR(200) | 会话标题 |
 | status | ENUM('active', 'closed') | 会话状态 |
+| intents_json | JSON | 会话意图状态快照（多意图支持） |
 | created_at | DATETIME | 创建时间 |
 | updated_at | DATETIME | 最后更新时间 |
 
@@ -73,9 +74,9 @@
 
 ### 核心模型
 
-- `IntentDefinition`: 意图定义（name, description, required_slots, optional_slots）
+- `IntentDefinition`: 意图定义（name, description, required_slots, optional_slots, handler）
 - `SlotDef`: 槽位定义（name, description, ask_prompt）
-- `NLUResult`: NLU 输出（intent, confidence, slots, missing_slots）
+- `NLUResult`: NLU 层增量式输出（action, target_intent, confidence, slots_update）
 
 ### 平台意图
 
@@ -101,18 +102,56 @@
 ### DialogState
 
 ```python
+class IntentContext(TypedDict):
+    """意图上下文 — 会话中产生的每个意图的完整状态"""
+    name: str                       # 意图名
+    confidence: float               # 识别置信度 0-1
+    status: str                     # "active" | "suspended" | "completed" | "cancelled"
+    slots: dict[str, object]        # 该意图独立槽位
+    required_slots: list[str]       # 必填槽位名列表
+    optional_slots: list[str]       # 可选槽位名列表
+
 class DialogState(TypedDict):
     session_id: str
     user_id: str
     user_input: str
-    intents: dict[str, IntentContext]  # 所有已识别意图
-    active_intent: str                 # 当前活跃意图名
-    slots: dict[str, Any]              # 已填充槽位
-    missing_slots: list[str]           # 缺失必填槽位
-    business_result: BusinessResult | None  # 业务执行结果
-    final_response: str                # 最终回复
-    should_fallback: bool              # 是否兜底
+    messages: list[dict[str, str]]        # 对话历史
+    all_intents: list[dict]               # 系统+业务线全部可用意图定义
+    intents: dict[str, IntentContext]     # 会话中产生的意图（含 status + 独立 slots）
+    active_intent: str                    # 当前活跃意图名
+    business_result: BusinessResult | None
+    final_response: str
+    should_fallback: bool
 ```
+
+**字段说明：**
+
+- `messages`: 对话历史，API 层从 DB 加载后注入
+- `all_intents`: 从 IntentRegistry 构建，供 NLU prompt 构造和前端渲染
+- `intents`: 会话中实际产生的意图容器，每个意图自带独立 `slots`（不同意图的同名槽位不会混淆）
+- `active_intent`: 当前活跃意图名，冗余字段方便路由和节点使用
+- 已移除 `slots` 和 `missing_slots` 全局字段，槽位跟随意图管理
+
+### 多意图支持（挂起/恢复模式）
+
+同一个会话中可同时存在多个意图。当用户在处理一个意图的过程中发起另一个意图时，系统自动挂起当前意图，切换到新意图；完成后自动恢复被挂起的意图。
+
+**意图生命周期状态：**
+
+| 状态 | 含义 |
+|------|------|
+| `active` | 当前正在处理（唯一） |
+| `suspended` | 被挂起，等待恢复 |
+| `completed` | 已完成（从容器中移除） |
+| `cancelled` | 用户取消（从容器中移除） |
+
+**核心机制：**
+
+- **IntentController**（`app/dm/intent_controller.py`）：纯逻辑类，封装意图 CRUD 和生命周期管理
+- **增量式 NLU 输出**：NLU 不再返回完整意图状态，而是返回 `action`（new/continue/switch/cancel）+ `target_intent` + `slots_update`（增量槽位）
+- **独立槽位**：每个意图的槽位嵌套在 `IntentContext.slots` 中，不同意图的槽位完全隔离
+- **自动恢复**：当前意图完成/取消后，按 LIFO 顺序自动恢复最近被挂起的意图
+- **持久化**：`Session.intents_json` 字段存储意图容器快照，每次对话回合结束后更新，下次同一会话运行时恢复
 
 ### 节点流程
 
@@ -129,7 +168,27 @@ entry → nlu → [条件路由]
 
 ### 意图管理
 
-使用字典 + active_intent（非栈式）：`intents: dict[str, IntentContext]` 保存所有意图，`active_intent: str` 指向当前活跃意图。
+使用 **字典 + active_intent**（非栈式）：`intents: dict[str, IntentContext]` 保存所有意图及其独立槽位，`active_intent: str` 指向当前活跃意图。每个意图自带 `status` 字段标记生命周期状态。意图切换由 `IntentController` 统一管理，通过 NLU 的增量式输出来决定创建、挂起、恢复、取消或完成意图。
+
+### 数据流示例
+
+```
+回合 1: 用户 "我要申请退货退款 ORD-001"
+  → NLU: {action:"new", target_intent:"postsale_return", slots_update:{order_id:"ORD-001"}}
+  → IntentController: 创建 postsale_return(active)
+  → 业务: ask_slot(postsale_type)
+  → 持久化 intents 快照: {postsale_return: {active, slots:{order_id:"ORD-001"}}}
+
+回合 2: 用户 "帮我查一下订单 ORD-003"
+  → NLU: {action:"new", target_intent:"order_query", slots_update:{order_id:"ORD-003"}}
+  → IntentController: 挂起 postsale_return(suspended)，创建 order_query(active)
+  → 业务: completed
+  → IntentController: 完成 order_query → 自动恢复 postsale_return(active)
+  → 持久化 intents 快照: {postsale_return: {active, slots:{order_id:"ORD-001"}}}
+
+回合 3: 助手自动提示 "请选择售后方式..."
+  （继续 postsale_return 流程）
+```
 
 ## 业务层
 

@@ -4,7 +4,7 @@
 
 **Goal:** 构建基于 LangGraph + FastAPI + SQLAlchemy + MySQL 的可扩展智能客服后端，包含 NLU 意图识别、DM 对话管理、业务处理、NLG 回复生成和会话管理。
 
-**Architecture:** 分层架构 — 通道层(REST+SSE) → NLU层 → DM层(LangGraph StateGraph) → 业务层 → NLG层 → 会话层。平台与业务线分离，通过注册中心和 Pydantic 模型通信。
+**Architecture:** 分层架构 — 通道层(REST+SSE) → NLU层 → DM层(LangGraph StateGraph) → 业务层 → NLG层 → 会话层。平台与业务线分离，通过注册中心和 Pydantic 模型通信。支持多意图挂起/恢复模式，每个意图独立维护槽位。
 
 **Tech Stack:** Python 3.14+, FastAPI, LangGraph, SQLAlchemy 2.x 异步, MySQL 8.0, Alembic, langchain-openai, pydantic-settings, loguru, pytest + httpx
 
