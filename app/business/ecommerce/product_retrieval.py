@@ -411,7 +411,8 @@ class GraphRAG:
     async def node_retrieval(self, route_res: list[RouteItem], top_k: int) -> dict:
         """根据标签和实体，检索入口节点
 
-        使用混合检索（向量+全文）查找候选入口节点。
+        优先使用混合检索（向量+全文），若 Neo4j 中未创建对应向量/全文索引，
+        则降级为 Cypher 文本精确匹配检索。
         """
         pairs: list[tuple[str, str]] = []
         for item in route_res:
@@ -438,21 +439,12 @@ class GraphRAG:
         # 对实体进行向量化
         query_vectors = self.embeddings.embed_documents(entities)
 
-        # 为每个标签创建混合检索任务
+        # 为每个标签创建混合检索任务（带降级处理）
         tasks = []
         for label, query_text, query_vector in zip(labels, query_texts, query_vectors):
-            retriever = HybridRetriever(
-                self.driver,
-                vector_index_name=label.lower() + "_vector",
-                fulltext_index_name=label.lower() + "_fulltext",
-            )
             tasks.append(
-                asyncio.to_thread(
-                    retriever.get_search_results,
-                    query_text,
-                    query_vector,
-                    top_k,
-                    effective_search_ratio=2,
+                self._hybrid_retrieve_or_fallback(
+                    label, query_text, query_vector, top_k
                 )
             )
 
@@ -460,13 +452,92 @@ class GraphRAG:
 
         for (label, _), result in zip(pairs, results):
             key_name = f"{label.lower()}_name" if label != "Attr" else f"{label.lower()}_value"
-            retrieved_nodes.setdefault(label, []).extend([
-                {key_name: item["node"][key_name], "score": item["score"]}
-                for item in result.records
-            ])
+            for item in result:
+                retrieved_nodes.setdefault(label, []).append(item)
 
         logger.info(f"入口节点: {retrieved_nodes}")
         return retrieved_nodes
+
+    async def _hybrid_retrieve_or_fallback(
+        self,
+        label: str,
+        query_text: str,
+        query_vector: list[float],
+        top_k: int,
+    ) -> list[dict]:
+        """尝试混合检索，索引缺失时降级为 CYPher 文本精确匹配"""
+        vector_index_name = label.lower() + "_vector"
+        fulltext_index_name = label.lower() + "_fulltext"
+
+        try:
+            retriever = HybridRetriever(
+                self.driver,
+                vector_index_name=vector_index_name,
+                fulltext_index_name=fulltext_index_name,
+            )
+            raw_result = await asyncio.to_thread(
+                retriever.get_search_results,
+                query_text,
+                query_vector,
+                top_k,
+                effective_search_ratio=2,
+            )
+            key_name = f"{label.lower()}_name" if label != "Attr" else f"{label.lower()}_value"
+            return [
+                {key_name: item["node"][key_name], "score": item["score"]}
+                for item in raw_result.records
+            ]
+        except Exception as e:
+            logger.warning(
+                f"混合检索失败（label={label}, vector_index={vector_index_name}, "
+                f"fulltext_index={fulltext_index_name}），降级为文本匹配检索: {e}"
+            )
+            return await self._fallback_text_search(label, query_text, top_k)
+
+    async def _fallback_text_search(
+        self,
+        label: str,
+        query_text: str,
+        top_k: int,
+    ) -> list[dict]:
+        """降级方案：Cypher 文本模糊匹配检索节点
+
+        在对应标签的节点中，用 CONTAINS 或 = 匹配实体名称。
+        """
+        assert self.driver is not None
+
+        # 将 OR 形式的全文查询转为实体列表
+        search_terms = [term.strip() for term in query_text.split(" OR ") if term.strip()]
+        if not search_terms:
+            return []
+
+        key_name = f"{label.lower()}_name" if label != "Attr" else f"{label.lower()}_value"
+
+        try:
+            # 构建模糊匹配查询
+            or_conditions = []
+            params: dict[str, object] = {"limit": top_k}
+            for i, term in enumerate(search_terms):
+                param_key = f"term_{i}"
+                params[param_key] = f"%{term}%"
+                or_conditions.append(f"n.{key_name} LIKE ${param_key}")
+
+            where_clause = " OR ".join(or_conditions)
+            cypher = f"""
+                MATCH (n:{label})
+                WHERE {where_clause}
+                RETURN n.{key_name} AS {key_name}
+                LIMIT $limit
+            """
+
+            records = self.driver.execute_query(cypher, params).records
+            return [
+                {key_name: record[key_name], "score": 0.5}
+                for record in records
+            ]
+        except Exception as e:
+            logger.warning(f"降级文本搜索也失败（label={label}）: {e}")
+            return []
 
     # ------------------------------------------------------------------
     # Cypher 生成
